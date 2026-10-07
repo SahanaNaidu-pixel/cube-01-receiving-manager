@@ -105,6 +105,16 @@ To use a backend somewhere other than `http://localhost:8000`, copy `frontend/.e
 
 The `change-me-*` keys are public. The backend accepts them only while `DEMO_MODE=true`; with demo mode off, any `change-me` key in `RECEIVING_API_KEYS` makes the inspection endpoints answer 503 until you replace it.
 
+## Running with a local model (no API key)
+
+[Ollama](https://ollama.com) runs a vision model on your own computer, so no API key or account is needed and photos never leave the machine:
+
+```bash
+ollama pull qwen2.5vl:3b
+```
+
+Then set `AI_PROVIDER=ollama` and `DEMO_MODE=false` in `.env` and restart the backend. Without a dedicated GPU an inspection takes roughly 1–3 minutes, and a 3B local model reads small label text less reliably than cloud models; the barcode decoder still gives an exact SKU when a barcode is visible.
+
 ## Running tests
 
 ```bash
@@ -133,9 +143,16 @@ Backend settings are read from environment variables (or the repo-root `.env`); 
 | `DEMO_MODE` | `false` | `true` simulates perception by scenario instead of calling a model (see [Demo mode](#demo-mode)). Never enable in production. |
 | `RECEIVING_API_KEYS` | empty | JSON map of API key to `{"organization_id", "operator_id", "role"}`, role `operator` or `approver`. Empty means every `/api/inspections*` call returns 503. |
 | `RECEIVING_SEAL_KEY` | empty | HMAC key used to seal evidence records. If empty, a random per-process key is used and `/verify` fails for records sealed before a restart. |
-| `AI_API_KEY` / `OPENAI_API_KEY` | empty | Model API key for live analysis; `AI_API_KEY` wins if both are set. |
-| `AI_MODEL` (fallback `OPENAI_MODEL`) | `gpt-4o-mini` | Vision model name. |
+| `AI_PROVIDER` | `openai` | `openai`, `gemini` or `ollama`. `gemini` and `ollama` use OpenAI-compatible endpoints with the same prompt and strict schema. |
+| `OLLAMA_MODEL` | `qwen2.5vl:3b` | Local vision model for `AI_PROVIDER=ollama` (no key; download it first with `ollama pull <model>`). |
+| `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Where the local Ollama server listens. |
+| `OLLAMA_TIMEOUT_S` / `OLLAMA_IMAGE_MAX_EDGE` | `300` / `1024` | Local runs are slow on CPU: longer timeout, smaller images, no retries. |
+| `GEMINI_API_KEY` | empty | Key for `AI_PROVIDER=gemini` (free tier at https://aistudio.google.com/apikey). |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini vision model. |
+| `AI_API_KEY` / `OPENAI_API_KEY` | empty | Key for `AI_PROVIDER=openai`; `AI_API_KEY` wins if both are set. |
+| `AI_MODEL` (fallback `OPENAI_MODEL`) | `gpt-4o-mini` | OpenAI vision model name. |
 | `OPENAI_BASE_URL` | empty | Optional OpenAI-compatible endpoint. |
+| `AI_API_STYLE` | `responses` | `responses` (OpenAI Responses API) or `chat` (chat completions, for other OpenAI-compatible providers). |
 | `AI_TIMEOUT_S` | `45` | Model request timeout in seconds. |
 | `DATABASE_URL` | `sqlite:///./receiving_manager.db` | Only file-backed `sqlite:///path` URLs are supported; relative paths resolve against the repo root. |
 | `UPLOAD_ROOT_DIR` | `uploads` | Directory for uploaded photos (relative to the working directory). |
@@ -160,7 +177,7 @@ Frontend (build time, in `frontend/.env`; see `frontend/.env.example`):
 - Set `DEMO_MODE=false`. In demo mode the caller picks the outcome via `?scenario=`, so results prove nothing.
 - Replace the `change-me-*` keys with generated ones, one per operator, e.g. `python -c "import secrets; print(secrets.token_urlsafe(24))"`. Give the `approver` role only to people allowed to release an inspection as PASS.
 - Set `RECEIVING_SEAL_KEY` to a generated secret (same command). Keep it outside the database and keep it stable: records sealed under an old key stop verifying.
-- Configure `AI_API_KEY` (or `OPENAI_API_KEY`) for live analysis. Without a working model, analysis ends in `PENDING_REVIEW`.
+- Configure a model for live analysis: `AI_API_KEY` (OpenAI) or `AI_PROVIDER=gemini` with `GEMINI_API_KEY`. Without a working model, analysis ends in `PENDING_REVIEW`. Gemini's free tier may use inputs to improve Google's models; use a paid tier for real supplier photos.
 - Set `CORS_ALLOWED_ORIGINS` to the deployed frontend origin(s) only.
 - Keep `.env` out of version control and out of images (it is listed in `.dockerignore`); pass settings with `--env-file` or your platform's secret store.
 - The SQLite database and `uploads/` are runtime data; put them on persistent storage.

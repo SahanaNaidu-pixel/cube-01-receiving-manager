@@ -176,7 +176,7 @@ def test_stream_fails_open_and_validates_before_streaming(monkeypatch):
 def test_health_reports_readiness_without_the_key(monkeypatch):
     _set_env(monkeypatch, DEMO_MODE="false", AI_API_KEY=None, OPENAI_API_KEY=None)
     body = client.get("/api/health").json()
-    assert body == {"status": "ok", "service": "receiving-manager", "mode": "live", "model": body["model"],
+    assert body == {"status": "ok", "service": "receiving-manager", "mode": "live", "provider": "openai", "model": body["model"],
                     "ai_configured": False, "barcode_reader": True, "image_quality": True}
     _set_env(monkeypatch, DEMO_MODE="true", AI_API_KEY="sk-secret-value")
     body = client.get("/api/health").json()

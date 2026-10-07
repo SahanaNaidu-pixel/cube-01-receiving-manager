@@ -26,6 +26,7 @@ def health() -> JSONResponse:
         "status": "ok",
         "service": "receiving-manager",
         "mode": "demo" if current.demo_mode else "live",
+        "provider": current.ai_provider,
         "model": current.ai_model,
         "ai_configured": bool(current.api_key),
         "barcode_reader": barcodes.available(),

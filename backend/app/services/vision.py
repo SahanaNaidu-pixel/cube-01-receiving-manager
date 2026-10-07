@@ -44,31 +44,34 @@ class PerceptionError(RuntimeError):
 
 
 def _public_ai_error(exc: Exception, settings) -> str | None:
-    """Readable failure_reason for OpenAI SDK errors, matched by class name so the SDK stays an optional import."""
+    """Readable failure_reason for OpenAI-SDK errors (OpenAI or Gemini), matched by class name so the SDK stays optional."""
     names = {cls.__name__ for cls in type(exc).__mro__}
+    vendor = {"gemini": "Gemini", "ollama": "Ollama"}.get(settings.ai_provider, "OpenAI")
     for name, text in (
-        ("AuthenticationError", "invalid OpenAI API key"),
-        ("PermissionDeniedError", f"this OpenAI API key may not use model '{settings.ai_model}'"),
-        ("RateLimitError", "OpenAI rate limit or quota exceeded; retry later"),
-        ("NotFoundError", f"model '{settings.ai_model}' not found or not available to this API key"),
-        ("APITimeoutError", f"OpenAI request timed out after {settings.ai_timeout_s:g}s"),
-        ("APIConnectionError", "could not reach the OpenAI API"),
-        ("InternalServerError", "OpenAI server error; retry later"),
+        ("AuthenticationError", f"invalid {vendor} API key"),
+        ("PermissionDeniedError", f"this {vendor} API key may not use model '{settings.ai_model}'"),
+        ("RateLimitError", f"{vendor} rate limit or quota exceeded; retry later"),
+        ("NotFoundError", f"model '{settings.ai_model}' is not downloaded; run: ollama pull {settings.ai_model}"
+         if vendor == "Ollama" else f"model '{settings.ai_model}' not found or not available to this API key"),
+        ("APITimeoutError", f"{vendor} request timed out after {settings.ai_timeout_s:g}s"),
+        ("APIConnectionError", "could not reach Ollama on this computer; is the Ollama app running?"
+         if vendor == "Ollama" else f"could not reach the {vendor} API"),
+        ("InternalServerError", f"{vendor} server error; retry later"),
     ):
         if name in names:
             return f"{name}: {text}"
     return None
 
 
-def model_image(path: str, mime_type: str) -> tuple[str, bytes]:
-    """(mime, bytes) sent to the model: EXIF-upright RGB JPEG, long edge <= MODEL_IMAGE_EDGE. Undecodable -> original."""
+def model_image(path: str, mime_type: str, max_edge: int = MODEL_IMAGE_EDGE) -> tuple[str, bytes]:
+    """(mime, bytes) sent to the model: EXIF-upright RGB JPEG, long edge <= max_edge. Undecodable -> original."""
     with open(path, "rb") as handle:
         original = handle.read()
     if not image_quality.available():
         return mime_type, original
     try:
         img = image_quality.open_upright(original).convert("RGB")
-        img.thumbnail((MODEL_IMAGE_EDGE, MODEL_IMAGE_EDGE))
+        img.thumbnail((max_edge, max_edge))
         out = io.BytesIO()
         img.save(out, "JPEG", quality=MODEL_JPEG_QUALITY)
         return "image/jpeg", out.getvalue()
@@ -222,7 +225,8 @@ class VisionService:
 
     def _call_model(self, settings) -> VisionAnalysisResponse:
         if not settings.api_key:
-            raise RuntimeError("AI analysis is not configured (AI_API_KEY / OPENAI_API_KEY unset).")
+            names = "GEMINI_API_KEY" if settings.ai_provider == "gemini" else "AI_API_KEY / OPENAI_API_KEY"
+            raise RuntimeError(f"AI analysis is not configured ({names} unset).")
         if not self.inspection.images:
             raise RuntimeError("No images uploaded for analysis.")
         try:
@@ -234,17 +238,22 @@ class VisionService:
             api_key=settings.api_key,
             base_url=settings.openai_base_url or None,
             timeout=settings.ai_timeout_s,
-            max_retries=2,
+            max_retries=settings.ai_max_retries,
         )
-        content: list[dict[str, Any]] = [{"type": "input_text", "text": PROMPT}]
+        photos = []
         for image in self.inspection.images:
-            mime, data = model_image(image.image_path, image.mime_type)
-            encoded = base64.b64encode(data).decode("ascii")
+            mime, data = model_image(image.image_path, image.mime_type, settings.ai_image_max_edge)
             issues = ",".join((image.quality or {}).get("issues") or []) or "none"
             # What the photo is and how good it is; never PO expectations (blind read).
-            content.append({"type": "input_text", "text": f"image_id={image.image_id} view={image.image_type} quality_issues={issues}"})
-            content.append({"type": "input_image", "image_url": f"data:{mime};base64,{encoded}", "detail": "high"})
+            photos.append((f"image_id={image.image_id} view={image.image_type} quality_issues={issues}",
+                           f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"))
+        if settings.ai_api_style == "chat":
+            return self._call_chat(client, settings, photos)
 
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": PROMPT}]
+        for tag, url in photos:
+            content.append({"type": "input_text", "text": tag})
+            content.append({"type": "input_image", "image_url": url, "detail": "high"})
         try:
             response = client.responses.create(
                 model=settings.ai_model,
@@ -264,6 +273,37 @@ class VisionService:
             raise RuntimeError(f"Model response not completed: {getattr(response, 'incomplete_details', None)}")
         self.model_version = getattr(response, "model", None) or settings.ai_model
         return VisionAnalysisResponse.model_validate_json(response.output_text)
+
+    def _call_chat(self, client, settings, photos) -> VisionAnalysisResponse:
+        """Chat-completions request (Gemini's OpenAI-compatible endpoint and similar), same prompt and strict schema."""
+        content: list[dict[str, Any]] = [{"type": "text", "text": PROMPT}]
+        for tag, url in photos:
+            content.append({"type": "text", "text": tag})
+            content.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
+        try:
+            response = client.chat.completions.create(
+                model=settings.ai_model,
+                messages=[{"role": "user", "content": content}],
+                response_format={"type": "json_schema",
+                                 "json_schema": {"name": "receiving_analysis", "schema": RESPONSE_SCHEMA, "strict": True}},
+            )
+        except Exception as exc:
+            reason = _public_ai_error(exc, settings)
+            if reason:
+                raise PerceptionError(reason) from exc
+            raise
+        if not getattr(response, "choices", None):
+            raise RuntimeError("Model returned no choices.")
+        choice = response.choices[0]
+        if getattr(choice.message, "refusal", None):
+            raise RuntimeError(f"Model refused: {str(choice.message.refusal)[:300]}")
+        if choice.finish_reason not in (None, "stop"):
+            raise RuntimeError(f"Model response not completed: finish_reason={choice.finish_reason}")
+        text = (choice.message.content or "").strip()
+        if text.startswith("```"):  # some compatible APIs wrap JSON in a fenced block
+            text = text.strip("`").removeprefix("json").strip()
+        self.model_version = getattr(response, "model", None) or settings.ai_model
+        return VisionAnalysisResponse.model_validate_json(text)
 
     def perceive(self, scenario: str | None = None) -> VisionAnalysisResponse:
         """Validated model (or demo) readings. Raises on any perception failure; the API turns that into PENDING_REVIEW."""
