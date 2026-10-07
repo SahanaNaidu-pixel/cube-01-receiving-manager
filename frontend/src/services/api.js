@@ -49,8 +49,8 @@ const DEFAULT_STATUS_MESSAGES = {
 
 // Single request helper: adds the key, parses JSON errors {detail} into readable text,
 // and lets callers supply friendlier messages per status code.
-async function request(path, { method = 'GET', json, body, raw = false, messages = {}, fallback = 'Request failed' } = {}) {
-  const headers = { 'X-API-Key': getApiKey() };
+async function request(path, { method = 'GET', json, body, raw = false, messages = {}, fallback = 'Request failed', signal, headers: extra = {} } = {}) {
+  const headers = { 'X-API-Key': getApiKey(), ...extra };
   if (json !== undefined) headers['Content-Type'] = 'application/json';
 
   let response;
@@ -59,8 +59,10 @@ async function request(path, { method = 'GET', json, body, raw = false, messages
       method,
       headers,
       body: json !== undefined ? JSON.stringify(json) : body,
+      signal,
     });
-  } catch {
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error;
     throw new ApiError(`Cannot reach the backend at ${API_BASE_URL}. Is it running?`, 0);
   }
 
@@ -87,6 +89,7 @@ async function request(path, { method = 'GET', json, body, raw = false, messages
 }
 
 export const healthCheck = () => request('/api/health', { fallback: 'Health check failed' });
+export const getHealth = healthCheck;
 
 export const listInspections = () => request('/api/inspections', { fallback: 'Could not load inspections' });
 
@@ -116,6 +119,97 @@ export function analyzeInspection(id, scenario = '') {
     method: 'POST',
     fallback: 'Analysis failed',
   });
+}
+
+// Parses one SSE block ("event:" / multiple "data:" lines) into { event, data }.
+function parseSseBlock(block) {
+  let event = 'message';
+  const data = [];
+  block.split('\n').forEach((line) => {
+    if (!line || line.startsWith(':')) return;
+    const index = line.indexOf(':');
+    const field = index < 0 ? line : line.slice(0, index);
+    let value = index < 0 ? '' : line.slice(index + 1);
+    if (value.startsWith(' ')) value = value.slice(1);
+    if (field === 'event') event = value;
+    else if (field === 'data') data.push(value);
+  });
+  if (!data.length) return null;
+  try {
+    return { event, data: JSON.parse(data.join('\n')) };
+  } catch {
+    return { event, data: data.join('\n') };
+  }
+}
+
+// POST /analyze/stream (SSE over fetch, since EventSource cannot send headers or POST).
+// onStep receives each {step, status, message, data}; resolves with the same object POST /analyze returns.
+// Falls back to the plain POST /analyze when the backend has no stream endpoint (404/405).
+export async function analyzeInspectionStream(id, scenario = '', onStep, { signal } = {}) {
+  const query = scenario ? `?scenario=${encodeURIComponent(scenario)}` : '';
+  let response;
+  try {
+    response = await request(`/api/inspections/${encodeURIComponent(id)}/analyze/stream${query}`, {
+      method: 'POST',
+      raw: true,
+      signal,
+      headers: { Accept: 'text/event-stream' },
+      fallback: 'Analysis failed',
+    });
+  } catch (error) {
+    if (error.status === 404 || error.status === 405) return analyzeInspection(id, scenario);
+    throw error;
+  }
+  if ((response.headers.get('content-type') || '').includes('application/json')) return response.json();
+
+  let result = null;
+  let lastError = '';
+  const handle = (block) => {
+    const parsed = parseSseBlock(block);
+    if (!parsed) return;
+    const { event, data } = parsed;
+    if (event === 'step' && data && typeof data === 'object') {
+      if (data.status === 'error') lastError = data.message || lastError;
+      onStep?.(data);
+    } else if (event === 'result') {
+      result = data;
+    } else if (event === 'error') {
+      const detail = typeof data === 'object' ? formatDetail(data.detail) || data.message : data;
+      throw new ApiError(detail || 'Analysis failed', data?.status || 500);
+    }
+  };
+
+  if (!response.body?.getReader) {
+    (await response.text()).replace(/\r\n?/g, '\n').split('\n\n').forEach(handle);
+  } else {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        // Normalize CRLF / CR; a trailing CR waits for the next chunk in case it is half of a CRLF.
+        buffer = done
+          ? (buffer + decoder.decode()).replace(/\r\n?/g, '\n')
+          : (buffer + decoder.decode(value, { stream: true })).replace(/\r\n|\r(?!$)/g, '\n');
+        let index;
+        while ((index = buffer.indexOf('\n\n')) >= 0) {
+          handle(buffer.slice(0, index));
+          buffer = buffer.slice(index + 2);
+        }
+        if (done) break;
+      }
+      if (buffer.trim()) handle(buffer);
+    } catch (error) {
+      reader.cancel().catch(() => {});
+      throw error;
+    }
+  }
+
+  if (!result) {
+    throw new ApiError(`The analysis stream ended without a result${lastError ? ` (${lastError})` : ''}. Reload the inspection to see whether it was recorded.`, 0);
+  }
+  return result;
 }
 
 export const overrideInspection = (id, decision, reason) =>

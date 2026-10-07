@@ -1,0 +1,5 @@
+# Run outputs (raw responses, photos' inspection ids) stay local; only the labelled demo example is tracked.
+*
+!.gitignore
+!example-demo/
+!example-demo/EVAL_REPORT.md

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { analyzeInspection, createInspection, uploadInspectionImages } from '../services/api';
 import { SCENARIOS } from '../constants';
 import { toPoPayload } from './PoEditor';
@@ -29,12 +29,14 @@ function placeholderImage(scenario) {
 
 const DEMO_REQUIRED = 'The Scenario Benchmark needs the backend running with DEMO_MODE=true. In live mode the scenario is ignored and analysis requires real photos.';
 
-export default function BenchmarkView({ poForm, demoMode, setDemoMode, onChanged, onOpenInspection }) {
+export default function BenchmarkView({ poForm, demoMode, setDemoMode, onChanged, onOpenInspection, onBusyChange }) {
   const [rows, setRows] = useState([]);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState('');
   const [notice, setNotice] = useState('');
   const po = toPoPayload(poForm);
+  const live = demoMode === false;
+  useEffect(() => { onBusyChange?.(running); }, [running, onBusyChange]);
 
   const run = async () => {
     // Already known to be live: don't send placeholder photos to the real model.
@@ -83,13 +85,16 @@ export default function BenchmarkView({ poForm, demoMode, setDemoMode, onChanged
       icon="gauge"
       subtitle={`Each scenario creates a fresh inspection for the current PO (${po.po_id || '—'} · ${po.product_name || '—'}), uploads one generated placeholder photo (image_type other) and analyzes it with that demo scenario. Expected outcomes assume a PO whose components include a cap (the PO-9001 preset).`}
       actions={(
-        <button type="button" className="btn btn--primary" onClick={run} disabled={running} aria-busy={running}>
+        <button type="button" className="btn btn--primary" onClick={run} disabled={running || live} title={live ? DEMO_REQUIRED : undefined} aria-busy={running}>
           {running ? <span className="spinner" aria-hidden="true" /> : <Icon name="play" size={15} />}
           {running ? 'Running…' : `Run all ${SCENARIOS.length} scenarios`}
         </button>
       )}
     >
       <div className="status-line" role="status" aria-live="polite">{progress}</div>
+      {live && !notice && (
+        <div className="alert alert--warning" role="status"><Icon name="alert" /><span className="alert__text">{DEMO_REQUIRED}</span></div>
+      )}
       {notice && (
         <div className="alert alert--warning" role="alert"><Icon name="alert" /><span className="alert__text">{notice}</span></div>
       )}
