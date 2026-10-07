@@ -1,4 +1,5 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+// Production builds without VITE_API_BASE_URL call the same origin (e.g. Vercel, where /api is served by the app).
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? 'http://localhost:8000' : '');
 const KEY_STORAGE = 'receivingApiKey';
 
 // Each key maps server-side to one organization + operator (and role). It is set from the

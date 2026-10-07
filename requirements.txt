@@ -1,0 +1,6 @@
+# Runtime dependencies for the Vercel Python function (api/index.py).
+fastapi>=0.116.1
+pydantic>=2.11.7
+python-multipart>=0.0.9
+openai>=1.60.0
+python-dotenv>=1.0.1
