@@ -10,6 +10,7 @@ _TMP = tempfile.mkdtemp(prefix="rcv-test-")
 os.environ["DATABASE_URL"] = f"sqlite:///{_TMP}/test.db"
 os.environ["UPLOAD_ROOT_DIR"] = f"{_TMP}/uploads"
 os.environ["RECEIVING_SEAL_KEY"] = "test-seal-key"
+os.environ["RECEIVING_DISABLE_DOTENV"] = "1"  # never pick up a developer .env
 os.environ["RECEIVING_API_KEYS"] = json.dumps({
     "key-a-op": {"organization_id": "org-a", "operator_id": "op-alice", "role": "operator"},
     "key-a-appr": {"organization_id": "org-a", "operator_id": "sup-bob", "role": "approver"},
@@ -148,11 +149,8 @@ def test_invalid_quantity():
 
 
 def test_invalid_confidence():
-    try:
+    with pytest.raises(ValidationError):
         InspectionCheck(check_name="quantity_check", status="PASS", reason="ok", confidence=1.5)
-    except ValidationError:
-        return
-    assert False, "ValidationError should have been raised for confidence outside 0..1"
 
 
 def test_overall_decision_rules():
@@ -322,11 +320,8 @@ def test_components():
 def test_unknown_image_id_from_model_is_rejected():
     service = _service()
     payload = VisionAnalysisResponse.model_validate({"images": [{"image_id": "IMG-FAKE", "visibility": "clear", "observations": CLEAN}]})
-    try:
+    with pytest.raises(ValueError):
         service._validate_payload(payload)
-    except ValueError:
-        return
-    assert False
 
 
 # --- OpenAI Responses API call shape -----------------------------------------------------------
@@ -378,7 +373,7 @@ def test_live_call_uses_responses_text_format_and_image_ids(monkeypatch):
     texts = " ".join(part.get("text", "") for part in kwargs["input"][0]["content"])
     assert ids[0] in texts and ids[1] in texts
     assert "BLUE-BOTTLE-001" not in texts  # blind read: PO values never reach the model
-    assert 10 <= _FakeOpenAI.init_kwargs["timeout"] <= 15
+    assert _FakeOpenAI.init_kwargs["timeout"] == 45 and _FakeOpenAI.init_kwargs["max_retries"] == 2
 
 
 def test_model_inventing_image_id_goes_to_pending_review(monkeypatch):
@@ -447,7 +442,7 @@ def test_record_follows_contract(monkeypatch):
     record = body["record"]
     for field in ("record_id", "schema_version", "organization_id", "subject", "images", "checks", "outcome", "overrides", "status", "content_hash", "seal", "created_at"):
         assert field in record, field
-    assert record["schema_version"] == "receiving.v1"
+    assert record["schema_version"] == "receiving_record.v1"
     assert record["created_at"].endswith("Z")
     assert record["subject"]["po_number"] == "PO-1001"
     assert record["images"][0]["sha256_digest"] == hashlib.sha256(_png_bytes()).hexdigest()
@@ -493,11 +488,8 @@ def test_db_records_are_append_only_and_tampering_is_detected(monkeypatch):
     iid, _ = _analyzed(monkeypatch)
     path = get_settings().database_url.removeprefix("sqlite:///")
     conn = sqlite3.connect(path)
-    try:
+    with pytest.raises(sqlite3.DatabaseError):  # the append-only trigger blocks updates
         conn.execute("UPDATE records SET record_json = '{}' WHERE inspection_id = ?", (iid,))
-        assert False, "trigger should block updates"
-    except sqlite3.DatabaseError:
-        pass
     # An attacker with file access drops the trigger, flips the verdict and recomputes the plain hash.
     row = conn.execute("SELECT record_id, record_json FROM records WHERE inspection_id = ?", (iid,)).fetchone()
     record = json.loads(row[1])

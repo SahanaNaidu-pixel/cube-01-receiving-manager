@@ -1,6 +1,11 @@
+import os
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import BaseModel, Field
+
+REPO_ROOT = Path(__file__).resolve().parents[3]  # parent of backend/
+ENV_FILE = REPO_ROOT / ".env"
 
 
 class Settings(BaseModel):
@@ -18,7 +23,7 @@ class Settings(BaseModel):
     demo_mode: bool = False
     openai_base_url: str = ""
     cors_allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"
-    ai_timeout_s: float = 15.0
+    ai_timeout_s: float = 45.0
     # JSON: {"<api key>": {"organization_id": "...", "operator_id": "...", "role": "operator|approver"}}
     receiving_api_keys: str = ""
     seal_key: str = ""
@@ -26,8 +31,14 @@ class Settings(BaseModel):
 
 @lru_cache
 def get_settings() -> Settings:
-    import os
+    # Real environment variables win over .env (override=False). RECEIVING_DISABLE_DOTENV=1 skips it (tests).
+    if not os.getenv("RECEIVING_DISABLE_DOTENV"):
+        try:
+            from dotenv import load_dotenv
 
+            load_dotenv(ENV_FILE, override=False)
+        except ImportError:
+            pass
     return Settings(
         app_name=os.getenv("APP_NAME", "receiving-manager"),
         api_key=os.getenv("AI_API_KEY", "") or os.getenv("OPENAI_API_KEY", ""),
@@ -43,7 +54,7 @@ def get_settings() -> Settings:
         demo_mode=str(os.getenv("DEMO_MODE", "false")).lower() == "true",
         openai_base_url=os.getenv("OPENAI_BASE_URL", ""),
         cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"),
-        ai_timeout_s=float(os.getenv("AI_TIMEOUT_S", "15")),
+        ai_timeout_s=float(os.getenv("AI_TIMEOUT_S", "45")),
         receiving_api_keys=os.getenv("RECEIVING_API_KEYS", ""),
         seal_key=os.getenv("RECEIVING_SEAL_KEY", ""),
     )

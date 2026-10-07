@@ -11,9 +11,9 @@ settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in settings.cors_allowed_origins.split(",") if origin.strip()],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,  # auth is the X-API-Key header, not cookies
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["X-API-Key", "Content-Type"],
 )
 
 
@@ -28,4 +28,5 @@ app.include_router(inspections_router)
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("backend.app.main:app", host="0.0.0.0", port=8000, reload=True)
+    # Local run: `python -m backend.app.main`. Host/port come from FASTAPI_HOST / FASTAPI_PORT.
+    uvicorn.run("backend.app.main:app", host=settings.fastapi_host, port=settings.fastapi_port)

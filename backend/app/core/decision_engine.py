@@ -5,12 +5,15 @@ Rule for every check: a value the system did not see gives UNCERTAIN, never the 
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 Decision = Literal["PASS", "EXCEPTION", "UNCERTAIN"]
 
 UNSEEN_MARKERS = {"", "unknown", "n/a", "uncertain", "not_available", "not_visible"}
 NO_DAMAGE_MARKERS = {"none", "no_damage", "no damage"}
+NOT_SPECIFIED_MARKERS = {"n/a", "na", "none"}  # PO deliberately names no variant
+_SKU_SEPARATORS = re.compile(r"[\s\-_./]+")
 
 
 def _normalize(value):
@@ -44,9 +47,17 @@ def evaluate_overall(checks: list[dict]) -> Decision:
 evaluate_inspection = evaluate_overall
 
 
+def normalize_sku(value):
+    """Uppercase and drop spaces, hyphens, underscores, dots and slashes. No O/0 substitution."""
+    cleaned = _normalize(value)
+    if not isinstance(cleaned, str):
+        return cleaned
+    return _SKU_SEPARATORS.sub("", cleaned).upper() or None
+
+
 def evaluate_sku_check(expected_sku, observed_sku):
-    expected = _normalize(expected_sku)
-    observed = _normalize(observed_sku)
+    expected = normalize_sku(expected_sku)
+    observed = normalize_sku(observed_sku)
 
     if expected is None:
         return _result("UNCERTAIN", "Expected SKU information is missing.", "PO_FIELD_MISSING")
@@ -105,8 +116,8 @@ def evaluate_total_quantity_check(po, observed_total, observed_cartons, observed
 
 def normalize_damage(observation) -> list[str] | None:
     """Damage readings arrive as str, list or None. Return tokens, or None when nothing was read."""
-    if observation is None:
-        return None
+    if observation is None or isinstance(observation, (bool, int, float)):
+        return None  # a number is not a damage assessment
     items = observation if isinstance(observation, list) else [observation]
     tokens = [str(item).strip().lower() for item in items if item is not None and str(item).strip()]
     return tokens or None
@@ -142,6 +153,9 @@ def evaluate_component_check(expected_components, observed_components, confirmed
     confirmed = [item for item in expected if item.lower() in missing and item.lower() not in present]
     if confirmed:
         return _result("FAIL", f"Missing expected components: {', '.join(confirmed)}.", "COMPONENT_MISSING")
+    conflicting = [item for item in expected if item.lower() in missing and item.lower() in present]
+    if conflicting:
+        return _result("UNCERTAIN", f"Photos disagree on whether these are present: {', '.join(conflicting)}.", "VIEWS_DISAGREE")
     unseen = [item for item in expected if item.lower() not in present]
     if unseen:
         return _result("UNCERTAIN", f"Components not seen in any photo: {', '.join(unseen)}.", "NOT_OBSERVED")
@@ -149,6 +163,8 @@ def evaluate_component_check(expected_components, observed_components, confirmed
 
 
 def evaluate_variant_check(expected_variant, observed_variant):
+    if isinstance(expected_variant, str) and expected_variant.strip().lower() in NOT_SPECIFIED_MARKERS:
+        return _result("NOT_REQUIRED", "The PO does not specify a variant.", "NOT_REQUIRED")
     expected = _normalize(expected_variant)
     observed = _normalize(observed_variant)
 

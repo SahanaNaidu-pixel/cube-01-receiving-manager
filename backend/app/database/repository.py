@@ -11,7 +11,7 @@ from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
-from backend.app.core.config import get_settings
+from backend.app.core.config import REPO_ROOT, get_settings
 from backend.app.models.inspection import Inspection
 
 SCHEMA = """
@@ -55,14 +55,20 @@ BEGIN SELECT RAISE(ABORT, 'overrides are append-only'); END;
 
 
 def _db_path() -> str:
-    url = get_settings().database_url
-    path = url.removeprefix("sqlite:///") if url.startswith("sqlite:///") else url
-    if path != ":memory:":
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-    return path
+    """Only file-backed sqlite:/// URLs. Relative paths resolve against the repo root, not the CWD."""
+    url = get_settings().database_url.strip()
+    path = url.removeprefix("sqlite:///") if url.startswith("sqlite:///") else None
+    if not path or path.startswith(":memory:") or "mode=memory" in path:
+        raise ValueError(f"Unsupported DATABASE_URL {url!r}: only file-backed sqlite:///path URLs are supported.")
+    resolved = Path(path) if Path(path).is_absolute() else REPO_ROOT / path
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    return str(resolved)
 
 
 class InspectionRepository:
+    def __init__(self):
+        _db_path()  # fail fast on an unsupported DATABASE_URL
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(_db_path(), isolation_level=None, timeout=10)
         conn.executescript(SCHEMA)
