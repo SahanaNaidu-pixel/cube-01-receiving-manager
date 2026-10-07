@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from backend.app.core.config import get_settings
-from backend.app.services import barcodes, image_quality
 from .api.inspections import router as inspections_router
 
 app = FastAPI(title="Receiving Manager", version="0.1.0")
@@ -20,18 +19,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health() -> JSONResponse:
-    """Unauthenticated readiness. ai_configured says whether a key is set, never the key itself."""
-    current = get_settings()
-    return JSONResponse({
-        "status": "ok",
-        "service": "receiving-manager",
-        "mode": "demo" if current.demo_mode else "live",
-        "provider": current.ai_provider,
-        "model": current.ai_model,
-        "ai_configured": bool(current.api_key),
-        "barcode_reader": barcodes.available(),
-        "image_quality": image_quality.available(),
-    })
+    return JSONResponse({"status": "ok", "service": "receiving-manager"})
 
 
 app.include_router(inspections_router)

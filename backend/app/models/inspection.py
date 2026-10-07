@@ -28,8 +28,6 @@ class ReceivingImage(BaseModel):
     sha256_digest: str = ""
     processing_state: Literal["uploaded", "ready", "analyzing", "analyzed", "failed"] = "uploaded"
     uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    quality: dict[str, Any] | None = None  # image_quality.assess(), computed at upload
-    barcodes: list[dict[str, Any]] | None = None  # None = not scanned yet; [] = scanned, nothing found
 
     @field_validator("image_id", "inspection_id", "filename", "stored_filename", "image_path")
     @classmethod
@@ -96,7 +94,6 @@ class Inspection(BaseModel):
     override_decision: FinalDecision | None = None
     override_reason: str | None = None
     agent_summary: str = ""
-    recommendations: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     status: InspectionStatus = "draft"

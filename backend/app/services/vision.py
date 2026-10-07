@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 from typing import Any, Literal
 
@@ -23,7 +22,6 @@ from backend.app.core.decision_engine import (
 )
 from backend.app.models.evidence import Evidence
 from backend.app.models.inspection import InspectionCheck, VisualObservation
-from backend.app.services import image_quality
 
 CHECK_TYPES = ["sku", "quantity", "carton", "units_per_carton", "variant", "damage", "components"]
 VISIBILITY = ["clear", "blurred", "occluded", "dark", "uncertain"]
@@ -31,52 +29,6 @@ VISIBILITY = ["clear", "blurred", "occluded", "dark", "uncertain"]
 # once there is a labelled real-photo set.
 MIN_CONFIDENCE = 0.6
 DISAGREE = object()
-MODEL_IMAGE_EDGE = 2048  # long edge sent to the model; stored originals are untouched
-MODEL_JPEG_QUALITY = 85
-
-
-class PerceptionError(RuntimeError):
-    """Raised with a client-safe reason (no key, no URL)."""
-
-    def __init__(self, public_reason: str):
-        super().__init__(public_reason)
-        self.public_reason = public_reason
-
-
-def _public_ai_error(exc: Exception, settings) -> str | None:
-    """Readable failure_reason for OpenAI-SDK errors (OpenAI or Gemini), matched by class name so the SDK stays optional."""
-    names = {cls.__name__ for cls in type(exc).__mro__}
-    vendor = {"gemini": "Gemini", "ollama": "Ollama"}.get(settings.ai_provider, "OpenAI")
-    for name, text in (
-        ("AuthenticationError", f"invalid {vendor} API key"),
-        ("PermissionDeniedError", f"this {vendor} API key may not use model '{settings.ai_model}'"),
-        ("RateLimitError", f"{vendor} rate limit or quota exceeded; retry later"),
-        ("NotFoundError", f"model '{settings.ai_model}' is not downloaded; run: ollama pull {settings.ai_model}"
-         if vendor == "Ollama" else f"model '{settings.ai_model}' not found or not available to this API key"),
-        ("APITimeoutError", f"{vendor} request timed out after {settings.ai_timeout_s:g}s"),
-        ("APIConnectionError", "could not reach Ollama on this computer; is the Ollama app running?"
-         if vendor == "Ollama" else f"could not reach the {vendor} API"),
-        ("InternalServerError", f"{vendor} server error; retry later"),
-    ):
-        if name in names:
-            return f"{name}: {text}"
-    return None
-
-
-def model_image(path: str, mime_type: str, max_edge: int = MODEL_IMAGE_EDGE) -> tuple[str, bytes]:
-    """(mime, bytes) sent to the model: EXIF-upright RGB JPEG, long edge <= max_edge. Undecodable -> original."""
-    with open(path, "rb") as handle:
-        original = handle.read()
-    if not image_quality.available():
-        return mime_type, original
-    try:
-        img = image_quality.open_upright(original).convert("RGB")
-        img.thumbnail((max_edge, max_edge))
-        out = io.BytesIO()
-        img.save(out, "JPEG", quality=MODEL_JPEG_QUALITY)
-        return "image/jpeg", out.getvalue()
-    except Exception:
-        return mime_type, original
 
 
 class VisionObservationItem(BaseModel):
@@ -225,46 +177,29 @@ class VisionService:
 
     def _call_model(self, settings) -> VisionAnalysisResponse:
         if not settings.api_key:
-            names = "GEMINI_API_KEY" if settings.ai_provider == "gemini" else "AI_API_KEY / OPENAI_API_KEY"
-            raise RuntimeError(f"AI analysis is not configured ({names} unset).")
+            raise RuntimeError("AI analysis is not configured (AI_API_KEY / OPENAI_API_KEY unset).")
         if not self.inspection.images:
             raise RuntimeError("No images uploaded for analysis.")
-        try:
-            import openai
-        except ImportError:
-            raise PerceptionError("RuntimeError: openai SDK is not installed (pip install -r backend/requirements.txt)") from None
+        import openai
 
         client = openai.OpenAI(
             api_key=settings.api_key,
             base_url=settings.openai_base_url or None,
             timeout=settings.ai_timeout_s,
-            max_retries=settings.ai_max_retries,
+            max_retries=2,
         )
-        photos = []
-        for image in self.inspection.images:
-            mime, data = model_image(image.image_path, image.mime_type, settings.ai_image_max_edge)
-            issues = ",".join((image.quality or {}).get("issues") or []) or "none"
-            # What the photo is and how good it is; never PO expectations (blind read).
-            photos.append((f"image_id={image.image_id} view={image.image_type} quality_issues={issues}",
-                           f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"))
-        if settings.ai_api_style == "chat":
-            return self._call_chat(client, settings, photos)
-
         content: list[dict[str, Any]] = [{"type": "input_text", "text": PROMPT}]
-        for tag, url in photos:
-            content.append({"type": "input_text", "text": tag})
-            content.append({"type": "input_image", "image_url": url, "detail": "high"})
-        try:
-            response = client.responses.create(
-                model=settings.ai_model,
-                input=[{"role": "user", "content": content}],
-                text={"format": {"type": "json_schema", "name": "receiving_analysis", "schema": RESPONSE_SCHEMA, "strict": True}},
-            )
-        except Exception as exc:
-            reason = _public_ai_error(exc, settings)
-            if reason:
-                raise PerceptionError(reason) from exc
-            raise
+        for image in self.inspection.images:
+            with open(image.image_path, "rb") as handle:
+                encoded = base64.b64encode(handle.read()).decode("ascii")
+            content.append({"type": "input_text", "text": f"image_id={image.image_id} view={image.image_type}"})
+            content.append({"type": "input_image", "image_url": f"data:{image.mime_type};base64,{encoded}", "detail": "high"})
+
+        response = client.responses.create(
+            model=settings.ai_model,
+            input=[{"role": "user", "content": content}],
+            text={"format": {"type": "json_schema", "name": "receiving_analysis", "schema": RESPONSE_SCHEMA, "strict": True}},
+        )
         for item in getattr(response, "output", None) or []:
             for part in getattr(item, "content", None) or []:
                 if getattr(part, "type", None) == "refusal":
@@ -274,52 +209,15 @@ class VisionService:
         self.model_version = getattr(response, "model", None) or settings.ai_model
         return VisionAnalysisResponse.model_validate_json(response.output_text)
 
-    def _call_chat(self, client, settings, photos) -> VisionAnalysisResponse:
-        """Chat-completions request (Gemini's OpenAI-compatible endpoint and similar), same prompt and strict schema."""
-        content: list[dict[str, Any]] = [{"type": "text", "text": PROMPT}]
-        for tag, url in photos:
-            content.append({"type": "text", "text": tag})
-            content.append({"type": "image_url", "image_url": {"url": url, "detail": "high"}})
-        try:
-            response = client.chat.completions.create(
-                model=settings.ai_model,
-                messages=[{"role": "user", "content": content}],
-                response_format={"type": "json_schema",
-                                 "json_schema": {"name": "receiving_analysis", "schema": RESPONSE_SCHEMA, "strict": True}},
-            )
-        except Exception as exc:
-            reason = _public_ai_error(exc, settings)
-            if reason:
-                raise PerceptionError(reason) from exc
-            raise
-        if not getattr(response, "choices", None):
-            raise RuntimeError("Model returned no choices.")
-        choice = response.choices[0]
-        if getattr(choice.message, "refusal", None):
-            raise RuntimeError(f"Model refused: {str(choice.message.refusal)[:300]}")
-        if choice.finish_reason not in (None, "stop"):
-            raise RuntimeError(f"Model response not completed: finish_reason={choice.finish_reason}")
-        text = (choice.message.content or "").strip()
-        if text.startswith("```"):  # some compatible APIs wrap JSON in a fenced block
-            text = text.strip("`").removeprefix("json").strip()
-        self.model_version = getattr(response, "model", None) or settings.ai_model
-        return VisionAnalysisResponse.model_validate_json(text)
-
-    def perceive(self, scenario: str | None = None) -> VisionAnalysisResponse:
-        """Validated model (or demo) readings. Raises on any perception failure; the API turns that into PENDING_REVIEW."""
+    def analyze(self, scenario: str | None = None) -> dict[str, Any]:
+        """Raises on any perception failure; the API turns that into PENDING_REVIEW."""
         settings = get_settings()
         if settings.demo_mode:
             self.model_version = "demo"
             payload = self._make_demo_scenario(scenario)
         else:
             payload = self._call_model(settings)
-        return self._validate_payload(payload)
-
-    def build(self, payload: VisionAnalysisResponse, barcodes: list[dict] | None = None) -> dict[str, Any]:
-        return self._build_result(payload, barcodes)
-
-    def analyze(self, scenario: str | None = None, barcodes: list[dict] | None = None) -> dict[str, Any]:
-        return self.build(self.perceive(scenario), barcodes)
+        return self._build_result(self._validate_payload(payload))
 
     def _validate_payload(self, payload: VisionAnalysisResponse) -> VisionAnalysisResponse:
         valid_image_ids = {image.image_id for image in self.inspection.images}
@@ -334,17 +232,9 @@ class VisionService:
                 image_result.visibility = "uncertain"
         return payload
 
-    def _build_result(self, payload: VisionAnalysisResponse, barcodes: list[dict] | None = None) -> dict[str, Any]:
-        """barcodes: [{image_id, format, text}]. Outside demo mode a code equal to the PO SKU is a deterministic SKU
-        reading; other codes (GTINs, tracking numbers) are only listed. Demo results stay scenario-driven."""
+    def _build_result(self, payload: VisionAnalysisResponse) -> dict[str, Any]:
         evidence_list: list[Evidence] = []
         visual_observations: list[VisualObservation] = []
-        barcodes = with_sku_match(barcodes, self.inspection.po.sku)
-        barcode_readings = [
-            (b["image_id"], VisionObservationItem(check_type="sku", observation=b["text"], confidence=1.0,
-                                                  description=f"Barcode {b['format']} decoded deterministically"))
-            for b in barcodes if b["matches_po_sku"] and self.model_version != "demo"
-        ]
 
         for image_result in payload.images:
             for item in image_result.observations:
@@ -369,11 +259,7 @@ class VisionService:
                 confidence=max((o.confidence for o in obs), default=0.0),
             ))
 
-        for image_id, item in barcode_readings:
-            evidence_list.append(Evidence(
-                evidence_id=f"EVD-{len(evidence_list) + 1:04d}", image_id=image_id, check_type="sku",
-                observation=item.observation, confidence=1.0, description=item.description))
-        checks = self._build_checks(payload, evidence_list, [item for _, item in barcode_readings], barcodes)
+        checks = self._build_checks(payload, evidence_list)
         decision = evaluate_overall([check.model_dump(mode="json") for check in checks])
         return {
             "decision": decision,
@@ -383,11 +269,9 @@ class VisionService:
             "observations": [item.model_dump(mode="json") for item in visual_observations],
         }
 
-    def _build_checks(self, payload: VisionAnalysisResponse, evidence: list[Evidence],
-                      barcode_readings=(), barcodes=()) -> list[InspectionCheck]:
+    def _build_checks(self, payload: VisionAnalysisResponse, evidence: list[Evidence]) -> list[InspectionCheck]:
         po = self.inspection.po
         readings: dict[str, list[VisionObservationItem]] = {k: [] for k in CHECK_TYPES}
-        readings["sku"] += barcode_readings
         partial: dict[str, list[dict]] = {"carton": [], "quantity": []}
         for image_result in payload.images:
             for item in image_result.observations:
@@ -463,8 +347,6 @@ class VisionService:
                     confidence = min(max((o.confidence for o in reliable[k]), default=0.0) for k in ("carton", "units_per_carton"))
             if not_reported:
                 measurements["images_not_reported"] = not_reported
-            if name == "sku_check" and barcodes:
-                measurements["barcodes"] = list(barcodes)
             checks.append(InspectionCheck(
                 check_name=name,
                 status=result["status"],
@@ -477,11 +359,6 @@ class VisionService:
                 confidence=confidence,
             ))
         return checks
-
-
-def with_sku_match(barcodes: list[dict] | None, po_sku: str) -> list[dict]:
-    expected = normalize_sku(po_sku)
-    return [{**b, "matches_po_sku": expected is not None and normalize_sku(b["text"]) == expected} for b in barcodes or []]
 
 
 def _as_text(observation) -> str:

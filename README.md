@@ -45,15 +45,6 @@ Inspection Result
 - Let operators override a verdict with a reason (PASS only for approvers)
 - Seal evidence records with an HMAC and verify the record chain on demand
 
-Real-time operation:
-
-- Capture photos straight from the browser camera per view (pallet, carton, label, unit, components); phones can also use the file picker's camera
-- Photo quality check on upload (blurry, too dark, overexposed, glare, too small) with retake prompts; quality is reported, never used to reject an upload
-- Deterministic barcode/QR decoding (zxing-cpp); a barcode whose text equals the PO SKU counts as a certain SKU reading
-- Live progress: the analysis streams each step (validate, photo quality, barcode, AI perception, rules, seal) to the UI as it happens
-- "Next actions" after each decision: which photo to retake or add to resolve an uncertain check
-- `/api/health` reports demo/live mode, the model, and whether a model key, barcode reader and quality checks are available
-
 ## Technology stack
 
 - Python 3.12+ (the backend Docker image uses `python:3.12-slim`)
@@ -62,7 +53,6 @@ Real-time operation:
 - SQLite (file-backed) for inspections and sealed evidence records
 - React + Vite (Node 20+)
 - OpenAI Python SDK (optional, for live analysis)
-- Pillow (photo quality checks and model-input preprocessing) and zxing-cpp (barcode decoding)
 - Local filesystem storage for uploads
 
 ## Quick start (local demo)
@@ -105,16 +95,6 @@ To use a backend somewhere other than `http://localhost:8000`, copy `frontend/.e
 
 The `change-me-*` keys are public. The backend accepts them only while `DEMO_MODE=true`; with demo mode off, any `change-me` key in `RECEIVING_API_KEYS` makes the inspection endpoints answer 503 until you replace it.
 
-## Running with a local model (no API key)
-
-[Ollama](https://ollama.com) runs a vision model on your own computer, so no API key or account is needed and photos never leave the machine:
-
-```bash
-ollama pull qwen2.5vl:3b
-```
-
-Then set `AI_PROVIDER=ollama` and `DEMO_MODE=false` in `.env` and restart the backend. Without a dedicated GPU an inspection takes roughly 1–3 minutes, and a 3B local model reads small label text less reliably than cloud models; the barcode decoder still gives an exact SKU when a barcode is visible.
-
 ## Running tests
 
 ```bash
@@ -122,17 +102,6 @@ python -m pytest backend/tests -q
 ```
 
 The tests use a temporary database and upload directory and ignore your `.env`.
-
-## Evaluation
-
-`scripts/evaluate.py` runs a labelled set of delivery photos through the running API and writes `EVAL_REPORT.md`: decision confusion matrix, false accepts and false rejects by case, abstention (UNCERTAIN / PENDING_REVIEW) rate, per-check precision and recall, latency, and failure modes grouped by reason code.
-
-```bash
-pip install -r scripts/requirements-eval.txt
-python scripts/evaluate.py --manifest eval/manifest.example.csv --api http://localhost:8000 --api-key <key> --split heldout
-```
-
-See [eval/README.md](eval/README.md) for the photo capture protocol and manifest format. `scripts/make_synthetic_set.py` generates a small synthetic set (drawn labels with real barcodes) to smoke-test the pipeline; synthetic and demo-mode results are **not** accuracy evidence, and no real-photo results have been measured yet.
 
 ## Configuration
 
@@ -143,16 +112,9 @@ Backend settings are read from environment variables (or the repo-root `.env`); 
 | `DEMO_MODE` | `false` | `true` simulates perception by scenario instead of calling a model (see [Demo mode](#demo-mode)). Never enable in production. |
 | `RECEIVING_API_KEYS` | empty | JSON map of API key to `{"organization_id", "operator_id", "role"}`, role `operator` or `approver`. Empty means every `/api/inspections*` call returns 503. |
 | `RECEIVING_SEAL_KEY` | empty | HMAC key used to seal evidence records. If empty, a random per-process key is used and `/verify` fails for records sealed before a restart. |
-| `AI_PROVIDER` | `openai` | `openai`, `gemini` or `ollama`. `gemini` and `ollama` use OpenAI-compatible endpoints with the same prompt and strict schema. |
-| `OLLAMA_MODEL` | `qwen2.5vl:3b` | Local vision model for `AI_PROVIDER=ollama` (no key; download it first with `ollama pull <model>`). |
-| `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Where the local Ollama server listens. |
-| `OLLAMA_TIMEOUT_S` / `OLLAMA_IMAGE_MAX_EDGE` | `300` / `1024` | Local runs are slow on CPU: longer timeout, smaller images, no retries. |
-| `GEMINI_API_KEY` | empty | Key for `AI_PROVIDER=gemini` (free tier at https://aistudio.google.com/apikey). |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini vision model. |
-| `AI_API_KEY` / `OPENAI_API_KEY` | empty | Key for `AI_PROVIDER=openai`; `AI_API_KEY` wins if both are set. |
-| `AI_MODEL` (fallback `OPENAI_MODEL`) | `gpt-4o-mini` | OpenAI vision model name. |
+| `AI_API_KEY` / `OPENAI_API_KEY` | empty | Model API key for live analysis; `AI_API_KEY` wins if both are set. |
+| `AI_MODEL` (fallback `OPENAI_MODEL`) | `gpt-4o-mini` | Vision model name. |
 | `OPENAI_BASE_URL` | empty | Optional OpenAI-compatible endpoint. |
-| `AI_API_STYLE` | `responses` | `responses` (OpenAI Responses API) or `chat` (chat completions, for other OpenAI-compatible providers). |
 | `AI_TIMEOUT_S` | `45` | Model request timeout in seconds. |
 | `DATABASE_URL` | `sqlite:///./receiving_manager.db` | Only file-backed `sqlite:///path` URLs are supported; relative paths resolve against the repo root. |
 | `UPLOAD_ROOT_DIR` | `uploads` | Directory for uploaded photos (relative to the working directory). |
@@ -177,7 +139,7 @@ Frontend (build time, in `frontend/.env`; see `frontend/.env.example`):
 - Set `DEMO_MODE=false`. In demo mode the caller picks the outcome via `?scenario=`, so results prove nothing.
 - Replace the `change-me-*` keys with generated ones, one per operator, e.g. `python -c "import secrets; print(secrets.token_urlsafe(24))"`. Give the `approver` role only to people allowed to release an inspection as PASS.
 - Set `RECEIVING_SEAL_KEY` to a generated secret (same command). Keep it outside the database and keep it stable: records sealed under an old key stop verifying.
-- Configure a model for live analysis: `AI_API_KEY` (OpenAI) or `AI_PROVIDER=gemini` with `GEMINI_API_KEY`. Without a working model, analysis ends in `PENDING_REVIEW`. Gemini's free tier may use inputs to improve Google's models; use a paid tier for real supplier photos.
+- Configure `AI_API_KEY` (or `OPENAI_API_KEY`) for live analysis. Without a working model, analysis ends in `PENDING_REVIEW`.
 - Set `CORS_ALLOWED_ORIGINS` to the deployed frontend origin(s) only.
 - Keep `.env` out of version control and out of images (it is listed in `.dockerignore`); pass settings with `--env-file` or your platform's secret store.
 - The SQLite database and `uploads/` are runtime data; put them on persistent storage.
@@ -224,14 +186,13 @@ Every `/api/inspections*` call needs an `X-API-Key` header with a key from `RECE
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/health` | No auth. Reports `mode` (`demo`/`live`), `model`, `ai_configured`, `barcode_reader`, `image_quality` (never the key). |
+| GET | `/api/health` | No auth. |
 | GET | `/api/inspections` | List the organization's inspections. |
 | POST | `/api/inspections` | Body `{"po": {...}}` with `po_id`, `sku`, `product_name`, `expected_quantity`, `variant`, `units_per_carton`, `expected_cartons`, optional `expected_components`. |
 | GET | `/api/inspections/{inspection_id}` | Inspection with checks, evidence and decision. |
 | POST | `/api/inspections/{inspection_id}/images` | Multipart: one or more `files` parts plus `image_type` (`pallet`, `carton`, `label`, `unit`, `other`). |
 | GET | `/api/inspections/{inspection_id}/images/{image_id}` | Returns the stored image. |
-| POST | `/api/inspections/{inspection_id}/analyze` | Runs analysis; optional `?scenario=` in demo mode. Needs at least one image. Response adds `recommendations`, `image_quality` and `barcodes`. |
-| POST | `/api/inspections/{inspection_id}/analyze/stream` | Same analysis as a `text/event-stream`: `step` events (`validate`, `quality`, `barcode`, `perception`, `rules`, `seal`, each `running` then `done` / `warning` / `skipped` / `error`), then one `result` event with the `/analyze` response. Errors found before the run starts (404, 400) come back as normal JSON. |
+| POST | `/api/inspections/{inspection_id}/analyze` | Runs analysis; optional `?scenario=` in demo mode. Needs at least one image. |
 | POST | `/api/inspections/{inspection_id}/override` | Body `{"decision": "PASS", "reason": "..."}`; decision is `PASS`, `EXCEPTION` or `UNCERTAIN`. PASS needs the `approver` role (403 otherwise); 409 before the inspection has been analyzed. |
 | GET | `/api/inspections/{inspection_id}/verify` | Re-checks the seals and hash chain of the stored evidence records. |
 
@@ -241,8 +202,7 @@ FastAPI also serves interactive API docs at http://localhost:8000/docs.
 
 - load inspection photos from the storage layer
 - validate image availability and ownership
-- check photo quality and decode barcodes deterministically
-- send each photo to the model upright and resized (max 2048 px JPEG; the stored original and its SHA-256 are unchanged), tagged only with its image id, view and quality issues; the model reads blind and is never told the PO's expected values
+- submit PO context and image metadata to the model
 - require structured JSON output
 - validate the AI response against a strict Pydantic contract
 - create evidence records and deterministic checks
@@ -279,8 +239,6 @@ The system is deliberately conservative:
 - ambiguous variants become `UNCERTAIN`
 - damaged cartons must be clearly visible to trigger `FAIL`
 - missing components are only reported when visible evidence supports the finding
-- poor-quality photos are flagged with a retake prompt, and photos that disagree on a value make that check `UNCERTAIN`
-- carton and total counts only come from photos the model marks as showing the whole shipment
 
 ## Security
 
@@ -302,7 +260,6 @@ The upload pipeline validates:
 - API keys are static entries in `RECEIVING_API_KEYS`; there is no user management or key rotation UI.
 - Real warehouse workflows, historical dashboards, and object-storage migration are still future work.
 - Demo mode is not a substitute for live multimodal inference.
-- Photo-quality thresholds were tuned on synthetic images only; recheck them on real dock photos. A barcode only proves identity when its text equals the PO SKU (GTIN or tracking barcodes are recorded but not matched).
 
 ## Future improvements
 
