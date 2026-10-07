@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from backend.app.core.config import get_settings
-from backend.app.services import barcodes, image_quality
 from .api.inspections import router as inspections_router
 
 app = FastAPI(title="Receiving Manager", version="0.1.0")
@@ -20,17 +19,7 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health() -> JSONResponse:
-    """Unauthenticated readiness. ai_configured says whether a key is set, never the key itself."""
-    current = get_settings()
-    return JSONResponse({
-        "status": "ok",
-        "service": "receiving-manager",
-        "mode": "demo" if current.demo_mode else "live",
-        "model": current.ai_model,
-        "ai_configured": bool(current.api_key),
-        "barcode_reader": barcodes.available(),
-        "image_quality": image_quality.available(),
-    })
+    return JSONResponse({"status": "ok", "service": "receiving-manager"})
 
 
 app.include_router(inspections_router)
@@ -39,5 +28,4 @@ app.include_router(inspections_router)
 if __name__ == "__main__":
     import uvicorn
 
-    # Local run: `python -m backend.app.main`. Host/port come from FASTAPI_HOST / FASTAPI_PORT.
-    uvicorn.run("backend.app.main:app", host=settings.fastapi_host, port=settings.fastapi_port)
+    uvicorn.run("backend.app.main:app", host="0.0.0.0", port=8000, reload=True)

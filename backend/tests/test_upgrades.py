@@ -332,20 +332,3 @@ def test_cors_is_header_auth_only():
 def test_demo_payload_without_shows_whole_shipment_defaults_true():
     assert VisionAnalysisResponse.model_validate({"images": [{"image_id": "IMG-1"}]}).images[0].shows_whole_shipment is True
     assert _service().inspection.images
-
-
-# GitHub scan follow-ups
-
-
-def test_public_example_keys_only_work_in_demo_mode(monkeypatch):
-    keys = json.dumps({"change-me-operator-key": {"organization_id": "org", "operator_id": "op"}})
-    _set_env(monkeypatch, RECEIVING_API_KEYS=keys, DEMO_MODE="false")
-    r = client.get("/api/inspections", headers={"X-API-Key": "change-me-operator-key"})
-    assert r.status_code == 503 and "change-me" in r.json()["detail"]
-    _set_env(monkeypatch, RECEIVING_API_KEYS=keys, DEMO_MODE="true")
-    assert client.get("/api/inspections", headers={"X-API-Key": "change-me-operator-key"}).status_code == 200
-
-
-def test_failure_reason_does_not_leak_urls():
-    reason = api._public_failure_reason(RuntimeError("Connection error to https://internal.example/v1/responses?key=x"))
-    assert reason == "RuntimeError: Connection error to <url>"

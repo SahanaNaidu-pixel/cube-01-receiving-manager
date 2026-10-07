@@ -149,8 +149,11 @@ def test_invalid_quantity():
 
 
 def test_invalid_confidence():
-    with pytest.raises(ValidationError):
+    try:
         InspectionCheck(check_name="quantity_check", status="PASS", reason="ok", confidence=1.5)
+    except ValidationError:
+        return
+    assert False, "ValidationError should have been raised for confidence outside 0..1"
 
 
 def test_overall_decision_rules():
@@ -320,8 +323,11 @@ def test_components():
 def test_unknown_image_id_from_model_is_rejected():
     service = _service()
     payload = VisionAnalysisResponse.model_validate({"images": [{"image_id": "IMG-FAKE", "visibility": "clear", "observations": CLEAN}]})
-    with pytest.raises(ValueError):
+    try:
         service._validate_payload(payload)
+    except ValueError:
+        return
+    assert False
 
 
 # --- OpenAI Responses API call shape -----------------------------------------------------------
@@ -488,8 +494,11 @@ def test_db_records_are_append_only_and_tampering_is_detected(monkeypatch):
     iid, _ = _analyzed(monkeypatch)
     path = get_settings().database_url.removeprefix("sqlite:///")
     conn = sqlite3.connect(path)
-    with pytest.raises(sqlite3.DatabaseError):  # the append-only trigger blocks updates
+    try:
         conn.execute("UPDATE records SET record_json = '{}' WHERE inspection_id = ?", (iid,))
+        assert False, "trigger should block updates"
+    except sqlite3.DatabaseError:
+        pass
     # An attacker with file access drops the trigger, flips the verdict and recomputes the plain hash.
     row = conn.execute("SELECT record_id, record_json FROM records WHERE inspection_id = ?", (iid,)).fetchone()
     record = json.loads(row[1])

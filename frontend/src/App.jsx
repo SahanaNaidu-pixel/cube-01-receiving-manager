@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { getApiKey, getHealth, getInspection, listInspections, setApiKey } from './services/api';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { getApiKey, getInspection, healthCheck, listInspections, setApiKey } from './services/api';
 import { PO_PRESETS, effectiveDecision, failedCategories, isAnalyzed } from './constants';
 import { poToForm } from './components/PoEditor';
 import { ErrorBanner, Icon } from './components/Shared';
@@ -16,7 +16,6 @@ const VIEWS = [
 ];
 const GROUPS = [...new Set(VIEWS.map((item) => item.group))];
 const THEME_KEY = 'receivingTheme';
-const AUTO_REFRESH_MS = 20000;
 
 function initialTheme() {
   try {
@@ -31,7 +30,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [keyInput, setKeyInput] = useState(getApiKey);
   const [connection, setConnection] = useState({ state: 'idle', message: 'Not connected' });
-  const [health, setHealth] = useState({ ok: null, text: 'Backend: checking…', info: null });
+  const [health, setHealth] = useState({ ok: null, text: 'Backend: checking…' });
   const [inspections, setInspections] = useState([]);
   const [loadingList, setLoadingList] = useState(false);
   const [demoMode, setDemoMode] = useState(null);
@@ -51,12 +50,10 @@ export default function App() {
 
   const checkHealth = useCallback(async () => {
     try {
-      const result = await getHealth();
-      setHealth({ ok: true, text: `Backend: ${result.status || 'ok'}`, info: result });
-      // Older backends omit mode; analyze responses still update it later.
-      if (result.mode === 'demo' || result.mode === 'live') setDemoMode(result.mode === 'demo');
+      const result = await healthCheck();
+      setHealth({ ok: true, text: `Backend: ${result.status || 'ok'}` });
     } catch (err) {
-      setHealth({ ok: false, text: `Backend: ${err.status ? `error ${err.status}` : 'unreachable'}`, info: null });
+      setHealth({ ok: false, text: `Backend: ${err.status ? `error ${err.status}` : 'unreachable'}` });
     }
   }, []);
 
@@ -104,26 +101,6 @@ export default function App() {
     else checkHealth();
   }, [connect, checkHealth]);
 
-  // Auto-refresh the inspections list while connected and the tab is visible; skip while a run is busy.
-  const busyRef = useRef({});
-  const setBusy = useCallback((key, value) => { busyRef.current[key] = value; }, []);
-  const scannerBusy = useCallback((value) => setBusy('scanner', value), [setBusy]);
-  const benchmarkBusy = useCallback((value) => setBusy('benchmark', value), [setBusy]);
-  useEffect(() => {
-    if (!connected) return undefined;
-    let last = Date.now();
-    const tick = (force) => {
-      if (document.visibilityState !== 'visible' || Object.values(busyRef.current).some(Boolean)) return;
-      if (!force && Date.now() - last < AUTO_REFRESH_MS - 500) return;
-      last = Date.now();
-      listInspections().then((result) => setInspections(result.items || [])).catch(() => { /* next tick retries */ });
-    };
-    const timer = setInterval(() => tick(false), AUTO_REFRESH_MS);
-    const onVisible = () => { if (Date.now() - last >= AUTO_REFRESH_MS) tick(true); };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
-  }, [connected]);
-
   const goTo = (key) => { setView(key); setNavOpen(false); };
 
   const openInspection = async (id) => {
@@ -166,10 +143,6 @@ export default function App() {
 
   const current = VIEWS.find((item) => item.key === view) || VIEWS[0];
   const healthTone = health.ok === null ? 'idle' : health.ok ? 'connected' : 'error';
-  const info = health.info;
-  const modeText = demoMode === null ? 'Mode unknown' : demoMode ? 'Demo' : `Live${info?.model ? ` · ${info.model}` : ''}`;
-  const modeTone = demoMode === null ? 'idle' : demoMode ? 'checking' : 'connected';
-  const noAiKey = info?.mode === 'live' && info.ai_configured === false;
 
   return (
     <div className={`app ${navOpen ? 'app--nav-open' : ''}`}>
@@ -213,20 +186,8 @@ export default function App() {
           <div className="status-row"><span className={`status-dot status-dot--${healthTone}`} />{health.text}</div>
           <div className="status-row">
             <span className={`status-dot status-dot--${demoMode === null ? 'idle' : demoMode ? 'checking' : 'connected'}`} />
-            Perception: {modeText}
+            Perception: {demoMode === null ? 'unknown' : demoMode ? 'demo' : 'live'}
           </div>
-          {typeof info?.barcode_reader === 'boolean' && (
-            <div className="status-row">
-              <span className={`status-dot status-dot--${info.barcode_reader ? 'connected' : 'idle'}`} />
-              Barcode reader: {info.barcode_reader ? 'available' : 'not installed'}
-            </div>
-          )}
-          {typeof info?.image_quality === 'boolean' && (
-            <div className="status-row">
-              <span className={`status-dot status-dot--${info.image_quality ? 'connected' : 'idle'}`} />
-              Photo quality check: {info.image_quality ? 'on' : 'off'}
-            </div>
-          )}
         </div>
       </aside>
       <div className="sidebar-scrim" onClick={() => setNavOpen(false)} aria-hidden="true" />
@@ -258,10 +219,6 @@ export default function App() {
             <button type="submit" className="btn btn--primary" disabled={connection.state === 'checking'}>
               {connection.state === 'checking' ? 'Connecting…' : 'Connect'}
             </button>
-            <span className={`conn-chip mode-chip mode-chip--${modeTone}`} title={`Perception mode: ${modeText}`}>
-              <span className={`status-dot status-dot--${modeTone}`} />
-              <span className="conn-chip__text">{modeText}</span>
-            </span>
             <span className={`conn-chip conn-chip--${connection.state}`} title={connection.message}>
               <span className={`status-dot status-dot--${connection.state}`} />
               <span className="conn-chip__text">{connection.message}</span>
@@ -282,12 +239,6 @@ export default function App() {
         <main className="content">
           <p className="content__subtitle">{current.subtitle}</p>
           <ErrorBanner message={error} onDismiss={() => setError('')} />
-          {noAiKey && (
-            <div className="alert alert--warning" role="status">
-              <Icon name="alert" />
-              <span className="alert__text">Live mode but no OpenAI key is configured on the server — analyses will be held as Pending · Hold.</span>
-            </div>
-          )}
 
           <section className="metrics" aria-label="Inspection statistics">
             {kpis.map((item) => (
@@ -313,11 +264,9 @@ export default function App() {
               setAnalysis={setAnalysis}
               demoMode={demoMode}
               setDemoMode={setDemoMode}
-              serverInfo={info}
               onChanged={refreshInspections}
               onError={setError}
               onOpenBenchmark={() => goTo('benchmark')}
-              onBusyChange={scannerBusy}
             />
           </div>
           <div role="region" id="panel-ledger" aria-labelledby="tab-ledger" hidden={view !== 'ledger'}>
@@ -336,7 +285,6 @@ export default function App() {
               setDemoMode={setDemoMode}
               onChanged={refreshInspections}
               onOpenInspection={openInspection}
-              onBusyChange={benchmarkBusy}
             />
           </div>
           <div role="region" id="panel-rules" aria-labelledby="tab-rules" hidden={view !== 'rules'}>

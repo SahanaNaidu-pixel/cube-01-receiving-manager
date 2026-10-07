@@ -4,8 +4,6 @@ import hashlib
 import hmac
 import json
 import logging
-import queue
-import re
 import threading
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -13,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
@@ -21,11 +19,9 @@ from backend.app.database.repository import InspectionRepository
 from backend.app.models.evidence import Evidence
 from backend.app.models.inspection import Inspection, InspectionCheck, ReceivingImage, VisualObservation
 from backend.app.models.po import PurchaseOrder
-from backend.app.services import barcodes as barcode_reader, image_quality
 from backend.app.services.storage import LocalStorage
 from backend.app.services.evidence_record import EPHEMERAL_MESSAGE, build_override_record, build_record, compute_hash, verify_seal
-from backend.app.services.recommendations import build_recommendations
-from backend.app.services.vision import VisionService, demo_scenario_names, normalize_scenario, with_sku_match
+from backend.app.services.vision import VisionService, demo_scenario_names, normalize_scenario
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/inspections", tags=["inspections"])
@@ -61,19 +57,6 @@ class InspectionOverrideRequest(BaseModel):
     reason: str = Field(..., min_length=1, max_length=2000)
 
 
-# The keys shipped in .env.example are public, so they only work for a local demo.
-PLACEHOLDER_KEY_PREFIX = "change-me"
-
-
-def _public_failure_reason(exc: Exception) -> str:
-    """Failure text returned to clients and sealed in the record: no URLs (e.g. the AI endpoint), no keys, bounded length."""
-    if getattr(exc, "public_reason", None):
-        return exc.public_reason
-    message = re.sub(r"https?://\S+", "<url>", str(exc))
-    message = re.sub(r"\b(sk|key)-[A-Za-z0-9_*\-]{4,}", "<redacted>", message)[:300]
-    return f"{type(exc).__name__}: {message}"
-
-
 @lru_cache(maxsize=4)
 def _parse_api_keys(raw: str) -> dict[str, dict]:
     """Validate RECEIVING_API_KEYS once per distinct value. Raises ValueError with a readable reason."""
@@ -105,10 +88,6 @@ def require_principal(x_api_key: str | None = Header(default=None)) -> dict:
         keys = _parse_api_keys(raw)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"RECEIVING_API_KEYS is malformed: {exc}") from None
-    if not get_settings().demo_mode and any(key.startswith(PLACEHOLDER_KEY_PREFIX) for key in keys):
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail="RECEIVING_API_KEYS still contains the public 'change-me' example keys; "
-                                   "they are only accepted with DEMO_MODE=true. Generate real keys.")
     if not x_api_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing X-API-Key header.")
     for key, principal in keys.items():
@@ -181,7 +160,7 @@ def _validate_image_upload(file: UploadFile, inspection_id: str):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Image file is empty: {original_name}")
 
     if len(content) > max_bytes:
-        raise HTTPException(status_code=413, detail="Image exceeds the configured size limit.")
+        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Image exceeds the configured size limit.")
 
     detected_type = _detect_image_mime(content)
     if detected_type not in allowed_types:
@@ -256,8 +235,6 @@ def upload_images(
     if not files:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No image files were provided")
     validated_files = [_validate_image_upload(file, inspection_id) for file in files]  # all-or-nothing: validate first
-    for validated in validated_files:  # reported, never a reason to reject
-        validated["quality"] = image_quality.assess(validated["content"])
     view = _contract_view(image_type)
     settings = get_settings()
     with _inspection_lock(principal["organization_id"], inspection_id):
@@ -281,7 +258,6 @@ def upload_images(
                         sha256_digest=hashlib.sha256(validated["content"]).hexdigest(),
                         processing_state="uploaded",
                         uploaded_at=datetime.now(timezone.utc),
-                        quality=validated["quality"],
                     )
                 )
             inspection.images.extend(saved_images)
@@ -319,161 +295,42 @@ PERCEPTION_CHECKS = ("sku_check", "carton_check", "units_per_carton_check", "qua
                      "variant_check", "damage_check", "component_check")
 
 
-def _check_scenario(scenario: str | None, settings) -> None:
-    if settings.demo_mode and scenario and normalize_scenario(scenario) not in demo_scenario_names():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Unknown demo scenario. Known: {', '.join(demo_scenario_names())}.")
-
-
 @router.post("/{inspection_id}/analyze")
 def analyze_inspection(inspection_id: str, scenario: str | None = None, principal: dict = Depends(require_principal)):
     settings = get_settings()
-    _check_scenario(scenario, settings)
+    if settings.demo_mode and scenario and normalize_scenario(scenario) not in demo_scenario_names():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"Unknown demo scenario. Known: {', '.join(demo_scenario_names())}.")
     with _inspection_lock(principal["organization_id"], inspection_id):
-        steps = _analysis_steps(principal, inspection_id, scenario, settings)
-        while True:
-            try:
-                next(steps)
-            except StopIteration as done:
-                return done.value
+        return _analyze_locked(principal, inspection_id, scenario, settings)
 
 
-SSE_KEEPALIVE_S = 10.0
-
-
-@router.post("/{inspection_id}/analyze/stream")
-def analyze_inspection_stream(inspection_id: str, scenario: str | None = None, principal: dict = Depends(require_principal)):
-    """Same run as /analyze, streamed as server-sent events: `step` events, then one `result` (the /analyze body).
-
-    The run happens on a worker thread that holds the inspection lock until it finishes, so a client that disconnects
-    mid-stream neither leaves the lock held nor half-writes the inspection.
-    """
-    settings = get_settings()
-    _check_scenario(scenario, settings)
-    if not _load(principal, inspection_id).images:  # plain HTTP errors before the stream starts
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No images uploaded for analysis")
-    events: queue.Queue = queue.Queue()
-
-    def work():
-        try:
-            with _inspection_lock(principal["organization_id"], inspection_id):
-                steps = _analysis_steps(principal, inspection_id, scenario, settings)
-                while True:
-                    try:
-                        events.put(("step", next(steps)))
-                    except StopIteration as done:
-                        events.put(("result", done.value))
-                        break
-        except HTTPException as exc:
-            events.put(("error", {"status_code": exc.status_code, "detail": exc.detail}))
-        except Exception:
-            log.exception("Streamed analysis failed for %s", inspection_id)
-            events.put(("error", {"status_code": 500, "detail": "Analysis failed unexpectedly."}))
-        finally:
-            events.put(None)
-
-    threading.Thread(target=work, name=f"analyze-{inspection_id}", daemon=True).start()
-
-    def stream():
-        while True:
-            try:
-                item = events.get(timeout=SSE_KEEPALIVE_S)
-            except queue.Empty:
-                yield ": keepalive\n\n"  # keeps proxies from closing the connection during a slow model call
-                continue
-            if item is None:
-                return
-            yield f"event: {item[0]}\ndata: {json.dumps(item[1], default=str)}\n\n"
-
-    return StreamingResponse(stream(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-def _step(step: str, state: str, message: str, **data) -> dict:
-    return {"step": step, "status": state, "message": message, "data": data}
-
-
-def _fail_open_result(model_version: str) -> dict:
-    return {
-        "decision": "PENDING_REVIEW",
-        "model_version": model_version,
-        "checks": [
-            InspectionCheck(
-                check_name=name, status="UNCERTAIN", expected_value=None, observed_value=None,
-                reason="Perception unavailable; not checked.", reason_code="PERCEPTION_UNAVAILABLE", confidence=0.0,
-            ).model_dump(mode="json")
-            for name in PERCEPTION_CHECKS
-        ],
-        "evidence": [],
-        "observations": [],
-    }
-
-
-def _analysis_steps(principal: dict, inspection_id: str, scenario: str | None, settings):
-    """The one analysis pipeline. Yields step events and returns the /analyze body. The caller holds the inspection lock."""
-    yield _step("validate", "running", "Loading inspection and photos")
+def _analyze_locked(principal: dict, inspection_id: str, scenario: str | None, settings) -> dict:
     inspection = _load(principal, inspection_id)
     if not inspection.images:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No images uploaded for analysis")
-    images = inspection.images
-    n = len(images)
-    mode = "demo" if settings.demo_mode else "live"
-    yield _step("validate", "done", f"{n} photo{'s' if n != 1 else ''} for PO {inspection.po.po_id} ({mode} mode)",
-                images=n, mode=mode, scenario=normalize_scenario(scenario) if settings.demo_mode else None)
-
-    yield _step("quality", "running", f"Checking sharpness, exposure and size of {n} photo{'s' if n != 1 else ''}")
-    for image in images:
-        if image.quality is None:  # uploaded before quality reports existed
-            image.quality = image_quality.assess_path(image.image_path)
-    quality = [{"image_id": i.image_id, "filename": i.filename, "view": i.image_type, **i.quality} for i in images]
-    flagged = any(q["issues"] for q in quality)
-    yield _step("quality", "warning" if flagged else "done", image_quality.summary(quality), images=quality)
-
-    if barcode_reader.available():
-        yield _step("barcode", "running", f"Scanning {n} photo{'s' if n != 1 else ''} for barcodes and QR codes")
-        for image in images:
-            if image.barcodes is None:
-                image.barcodes = barcode_reader.decode_path(image.image_path)
-    else:
-        yield _step("barcode", "skipped", "Barcode reader not installed (pip install zxing-cpp)")
-    codes = with_sku_match([{"image_id": i.image_id, **b} for i in images for b in i.barcodes or []], inspection.po.sku)
-    if barcode_reader.available():
-        if codes:
-            first = next((c for c in codes if c["matches_po_sku"]), codes[0])
-            message = f"Decoded {first['format']} '{first['text']}' in {first['image_id']}"
-            message += " (matches PO SKU)" if first["matches_po_sku"] else " (not the PO SKU)"
-            message += f" and {len(codes) - 1} more" if len(codes) > 1 else ""
-        else:
-            message = "No barcodes found"
-        yield _step("barcode", "done", message, barcodes=codes)
 
     service = VisionService(inspection)
-    if settings.demo_mode:
-        yield _step("perception", "running", f"Demo scenario '{normalize_scenario(scenario)}': simulated readings, no model call")
-    else:
-        yield _step("perception", "running", f"Asking {settings.ai_model} to read {n} photo{'s' if n != 1 else ''}",
-                    model=settings.ai_model)
     failure_reason = None
     try:
-        payload = service.perceive(scenario=scenario if settings.demo_mode else None)
+        result = service.analyze(scenario=scenario if settings.demo_mode else None)
     except Exception as exc:  # fail-open: any perception failure holds the shipment for a human
         log.exception("Perception failed for %s", inspection_id)
-        failure_reason = _public_failure_reason(exc)
-        yield _step("perception", "error", f"Perception failed, holding for review: {failure_reason}", failure_reason=failure_reason)
-    else:
-        readings = sum(len(r.observations) for r in payload.images)
-        yield _step("perception", "done", f"{service.model_version} returned {readings} readings for {len(payload.images)} of {n} photos",
-                    model_version=service.model_version, readings=readings)
+        failure_reason = f"{type(exc).__name__}: {str(exc)[:300]}"
+        result = {
+            "decision": "PENDING_REVIEW",
+            "model_version": service.model_version,
+            "checks": [
+                InspectionCheck(
+                    check_name=name, status="UNCERTAIN", expected_value=None, observed_value=None,
+                    reason="Perception unavailable; not checked.", reason_code="PERCEPTION_UNAVAILABLE", confidence=0.0,
+                ).model_dump(mode="json")
+                for name in PERCEPTION_CHECKS
+            ],
+            "evidence": [],
+            "observations": [],
+        }
 
-    yield _step("rules", "running", "Applying receiving rules to the readings")
-    result = _fail_open_result(service.model_version) if failure_reason else service.build(payload, codes)
-    counts = {s: sum(1 for c in result["checks"] if c["status"] == s) for s in ("PASS", "FAIL", "UNCERTAIN", "NOT_REQUIRED")}
-    message = (f"{len(result['checks'])} checks: {counts['PASS']} passed, {counts['FAIL']} failed, {counts['UNCERTAIN']} uncertain"
-               + (f", {counts['NOT_REQUIRED']} not required" if counts["NOT_REQUIRED"] else "") + f" -> {result['decision']}")
-    yield _step("rules", "done", message, decision=result["decision"], counts=counts)
-
-    recommendations = build_recommendations(decision=result["decision"], checks=result["checks"], images=images,
-                                            failure_reason=failure_reason)
     inspection.checks = [InspectionCheck.model_validate(item) for item in result["checks"]]
     inspection.evidence = [Evidence.model_validate(item) for item in result["evidence"]]
     inspection.observations = [VisualObservation.model_validate(item) for item in result["observations"]]
@@ -481,12 +338,10 @@ def _analysis_steps(principal: dict, inspection_id: str, scenario: str | None, s
     inspection.override_decision = None
     inspection.override_reason = None
     inspection.agent_summary = _build_agent_summary(inspection)
-    inspection.recommendations = recommendations
     inspection.status = "completed" if failure_reason is None else "pending"
     inspection.updated_at = datetime.now(timezone.utc)
     repository.update(inspection)
 
-    yield _step("seal", "running", "Sealing the evidence record")
     # A new record version; earlier versions and every override stay in the chain.
     record = repository.append_record(
         principal["organization_id"], inspection_id,
@@ -497,8 +352,6 @@ def _analysis_steps(principal: dict, inspection_id: str, scenario: str | None, s
             evidence=result["evidence"],
         ),
     )
-    yield _step("seal", "done", f"Record v{record['version']} sealed {record['content_hash'][:6]}…",
-                record_id=record["record_id"], version=record["version"], content_hash=record["content_hash"])
 
     return {
         "inspection_id": inspection_id,
@@ -511,9 +364,6 @@ def _analysis_steps(principal: dict, inspection_id: str, scenario: str | None, s
         "failure_reason": failure_reason,
         "agent_summary": inspection.agent_summary,
         "record": record,
-        "recommendations": recommendations,
-        "image_quality": quality,
-        "barcodes": codes,
     }
 
 

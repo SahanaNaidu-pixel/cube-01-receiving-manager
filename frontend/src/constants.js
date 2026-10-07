@@ -116,34 +116,3 @@ export const formatTime = (value) => {
 };
 
 export const shortHash = (hash) => (hash ? `${String(hash).slice(0, 12)}…` : '—');
-
-// Steps emitted by POST /analyze/stream, in pipeline order.
-export const PIPELINE_STEPS = [
-  { key: 'validate', label: 'Validate' },
-  { key: 'quality', label: 'Photo quality' },
-  { key: 'barcode', label: 'Barcode' },
-  { key: 'perception', label: 'AI perception' },
-  { key: 'rules', label: 'Rules' },
-  { key: 'seal', label: 'Seal record' },
-];
-
-// Server image-quality issue codes -> operator-facing labels.
-const QUALITY_LABELS = {
-  too_small: 'Low resolution',
-  low_resolution: 'Low resolution',
-  too_dark: 'Too dark',
-  overexposed: 'Overexposed',
-  too_bright: 'Overexposed',
-  glare: 'Glare',
-  blurry: 'Blurry',
-};
-export const qualityLabel = (issue) => {
-  const text = QUALITY_LABELS[issue] || String(issue || '').replace(/_/g, ' ');
-  return text.charAt(0).toUpperCase() + text.slice(1);
-};
-// Unique labels for an image's quality issues (empty when OK or not assessed).
-export const qualityIssues = (quality) => [...new Set((quality?.issues || []).map(qualityLabel))];
-export const needsRetake = (quality) => Boolean(quality) && (quality.ok === false || qualityIssues(quality).length > 0);
-
-// Client-side pre-check before upload: the long edge should be at least this many pixels.
-export const MIN_LONG_EDGE = 640;
