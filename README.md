@@ -45,6 +45,15 @@ Inspection Result
 - Let operators override a verdict with a reason (PASS only for approvers)
 - Seal evidence records with an HMAC and verify the record chain on demand
 
+Real-time operation:
+
+- Capture photos straight from the browser camera per view (pallet, carton, label, unit, components); phones can also use the file picker's camera
+- Photo quality check on upload (blurry, too dark, overexposed, glare, too small) with retake prompts; quality is reported, never used to reject an upload
+- Deterministic barcode/QR decoding (zxing-cpp); a barcode whose text equals the PO SKU counts as a certain SKU reading
+- Live progress: the analysis streams each step (validate, photo quality, barcode, AI perception, rules, seal) to the UI as it happens
+- "Next actions" after each decision: which photo to retake or add to resolve an uncertain check
+- `/api/health` reports demo/live mode, the model, and whether a model key, barcode reader and quality checks are available
+
 ## Technology stack
 
 - Python 3.12+ (the backend Docker image uses `python:3.12-slim`)
@@ -53,6 +62,7 @@ Inspection Result
 - SQLite (file-backed) for inspections and sealed evidence records
 - React + Vite (Node 20+)
 - OpenAI Python SDK (optional, for live analysis)
+- Pillow (photo quality checks and model-input preprocessing) and zxing-cpp (barcode decoding)
 - Local filesystem storage for uploads
 
 ## Quick start (local demo)
@@ -102,6 +112,17 @@ python -m pytest backend/tests -q
 ```
 
 The tests use a temporary database and upload directory and ignore your `.env`.
+
+## Evaluation
+
+`scripts/evaluate.py` runs a labelled set of delivery photos through the running API and writes `EVAL_REPORT.md`: decision confusion matrix, false accepts and false rejects by case, abstention (UNCERTAIN / PENDING_REVIEW) rate, per-check precision and recall, latency, and failure modes grouped by reason code.
+
+```bash
+pip install -r scripts/requirements-eval.txt
+python scripts/evaluate.py --manifest eval/manifest.example.csv --api http://localhost:8000 --api-key <key> --split heldout
+```
+
+See [eval/README.md](eval/README.md) for the photo capture protocol and manifest format. `scripts/make_synthetic_set.py` generates a small synthetic set (drawn labels with real barcodes) to smoke-test the pipeline; synthetic and demo-mode results are **not** accuracy evidence, and no real-photo results have been measured yet.
 
 ## Configuration
 
@@ -186,13 +207,14 @@ Every `/api/inspections*` call needs an `X-API-Key` header with a key from `RECE
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/health` | No auth. |
+| GET | `/api/health` | No auth. Reports `mode` (`demo`/`live`), `model`, `ai_configured`, `barcode_reader`, `image_quality` (never the key). |
 | GET | `/api/inspections` | List the organization's inspections. |
 | POST | `/api/inspections` | Body `{"po": {...}}` with `po_id`, `sku`, `product_name`, `expected_quantity`, `variant`, `units_per_carton`, `expected_cartons`, optional `expected_components`. |
 | GET | `/api/inspections/{inspection_id}` | Inspection with checks, evidence and decision. |
 | POST | `/api/inspections/{inspection_id}/images` | Multipart: one or more `files` parts plus `image_type` (`pallet`, `carton`, `label`, `unit`, `other`). |
 | GET | `/api/inspections/{inspection_id}/images/{image_id}` | Returns the stored image. |
-| POST | `/api/inspections/{inspection_id}/analyze` | Runs analysis; optional `?scenario=` in demo mode. Needs at least one image. |
+| POST | `/api/inspections/{inspection_id}/analyze` | Runs analysis; optional `?scenario=` in demo mode. Needs at least one image. Response adds `recommendations`, `image_quality` and `barcodes`. |
+| POST | `/api/inspections/{inspection_id}/analyze/stream` | Same analysis as a `text/event-stream`: `step` events (`validate`, `quality`, `barcode`, `perception`, `rules`, `seal`, each `running` then `done` / `warning` / `skipped` / `error`), then one `result` event with the `/analyze` response. Errors found before the run starts (404, 400) come back as normal JSON. |
 | POST | `/api/inspections/{inspection_id}/override` | Body `{"decision": "PASS", "reason": "..."}`; decision is `PASS`, `EXCEPTION` or `UNCERTAIN`. PASS needs the `approver` role (403 otherwise); 409 before the inspection has been analyzed. |
 | GET | `/api/inspections/{inspection_id}/verify` | Re-checks the seals and hash chain of the stored evidence records. |
 
@@ -202,7 +224,8 @@ FastAPI also serves interactive API docs at http://localhost:8000/docs.
 
 - load inspection photos from the storage layer
 - validate image availability and ownership
-- submit PO context and image metadata to the model
+- check photo quality and decode barcodes deterministically
+- send each photo to the model upright and resized (max 2048 px JPEG; the stored original and its SHA-256 are unchanged), tagged only with its image id, view and quality issues; the model reads blind and is never told the PO's expected values
 - require structured JSON output
 - validate the AI response against a strict Pydantic contract
 - create evidence records and deterministic checks
@@ -239,6 +262,8 @@ The system is deliberately conservative:
 - ambiguous variants become `UNCERTAIN`
 - damaged cartons must be clearly visible to trigger `FAIL`
 - missing components are only reported when visible evidence supports the finding
+- poor-quality photos are flagged with a retake prompt, and photos that disagree on a value make that check `UNCERTAIN`
+- carton and total counts only come from photos the model marks as showing the whole shipment
 
 ## Security
 
@@ -260,6 +285,7 @@ The upload pipeline validates:
 - API keys are static entries in `RECEIVING_API_KEYS`; there is no user management or key rotation UI.
 - Real warehouse workflows, historical dashboards, and object-storage migration are still future work.
 - Demo mode is not a substitute for live multimodal inference.
+- Photo-quality thresholds were tuned on synthetic images only; recheck them on real dock photos. A barcode only proves identity when its text equals the PO SKU (GTIN or tracking barcodes are recorded but not matched).
 
 ## Future improvements
 

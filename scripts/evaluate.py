@@ -345,7 +345,7 @@ def fmt(v, digits=2):
 def render_report(meta: dict, m: dict, records: list[dict]) -> str:
     L = []
     w = L.append
-    w(f"# Receiving Manager evaluation report\n")
+    w("# Receiving Manager evaluation report\n")
     if meta.get("banner"):
         w(f"> **{meta['banner']}**\n")
     w("## Run metadata\n")
