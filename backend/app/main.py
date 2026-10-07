@@ -28,4 +28,5 @@ app.include_router(inspections_router)
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("backend.app.main:app", host="0.0.0.0", port=8000, reload=True)
+    # Local run: `python -m backend.app.main`. Host/port come from FASTAPI_HOST / FASTAPI_PORT.
+    uvicorn.run("backend.app.main:app", host=settings.fastapi_host, port=settings.fastapi_port)

@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -57,6 +58,16 @@ class InspectionOverrideRequest(BaseModel):
     reason: str = Field(..., min_length=1, max_length=2000)
 
 
+# The keys shipped in .env.example are public, so they only work for a local demo.
+PLACEHOLDER_KEY_PREFIX = "change-me"
+
+
+def _public_failure_reason(exc: Exception) -> str:
+    """Failure text returned to clients and sealed in the record: no URLs (e.g. the AI endpoint), bounded length."""
+    message = re.sub(r"https?://\S+", "<url>", str(exc))[:300]
+    return f"{type(exc).__name__}: {message}"
+
+
 @lru_cache(maxsize=4)
 def _parse_api_keys(raw: str) -> dict[str, dict]:
     """Validate RECEIVING_API_KEYS once per distinct value. Raises ValueError with a readable reason."""
@@ -88,6 +99,10 @@ def require_principal(x_api_key: str | None = Header(default=None)) -> dict:
         keys = _parse_api_keys(raw)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"RECEIVING_API_KEYS is malformed: {exc}") from None
+    if not get_settings().demo_mode and any(key.startswith(PLACEHOLDER_KEY_PREFIX) for key in keys):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="RECEIVING_API_KEYS still contains the public 'change-me' example keys; "
+                                   "they are only accepted with DEMO_MODE=true. Generate real keys.")
     if not x_api_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing X-API-Key header.")
     for key, principal in keys.items():
@@ -160,7 +175,7 @@ def _validate_image_upload(file: UploadFile, inspection_id: str):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Image file is empty: {original_name}")
 
     if len(content) > max_bytes:
-        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Image exceeds the configured size limit.")
+        raise HTTPException(status_code=413, detail="Image exceeds the configured size limit.")
 
     detected_type = _detect_image_mime(content)
     if detected_type not in allowed_types:
@@ -316,7 +331,7 @@ def _analyze_locked(principal: dict, inspection_id: str, scenario: str | None, s
         result = service.analyze(scenario=scenario if settings.demo_mode else None)
     except Exception as exc:  # fail-open: any perception failure holds the shipment for a human
         log.exception("Perception failed for %s", inspection_id)
-        failure_reason = f"{type(exc).__name__}: {str(exc)[:300]}"
+        failure_reason = _public_failure_reason(exc)
         result = {
             "decision": "PENDING_REVIEW",
             "model_version": service.model_version,
