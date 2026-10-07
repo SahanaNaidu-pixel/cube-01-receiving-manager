@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -9,8 +9,9 @@ from .evidence import Evidence
 from .po import PurchaseOrder
 
 InspectionStatus = Literal["draft", "pending", "completed"]
-DecisionStatus = Literal["PASS", "FAIL", "UNCERTAIN"]
-FinalDecision = Literal["PASS", "EXCEPTION", "UNCERTAIN"]
+DecisionStatus = Literal["PASS", "FAIL", "UNCERTAIN", "NOT_REQUIRED"]
+# PENDING_REVIEW = perception failed (fail-open); UNCERTAIN = evidence inconclusive.
+FinalDecision = Literal["PASS", "EXCEPTION", "UNCERTAIN", "PENDING_REVIEW"]
 
 
 class ReceivingImage(BaseModel):
@@ -24,6 +25,7 @@ class ReceivingImage(BaseModel):
     image_type: str = Field(default="receiving_photo")
     mime_type: str = Field(default="image/jpeg")
     file_size: int = Field(default=0, ge=0)
+    sha256_digest: str = ""
     processing_state: Literal["uploaded", "ready", "analyzing", "analyzed", "failed"] = "uploaded"
     uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -66,6 +68,8 @@ class InspectionCheck(BaseModel):
     observed_value: str | int | list[str] | None = None
     evidence_ids: list[str] = Field(default_factory=list)
     reason: str = Field(..., min_length=1)
+    reason_code: str = ""
+    measurements: dict[str, Any] = Field(default_factory=dict)
     confidence: float = Field(..., ge=0.0, le=1.0)
 
     @field_validator("check_name")
@@ -80,6 +84,7 @@ class Inspection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     inspection_id: str = Field(..., min_length=1)
+    organization_id: str = ""
     po: PurchaseOrder
     images: list[ReceivingImage] = Field(default_factory=list)
     observations: list[VisualObservation] = Field(default_factory=list)
@@ -92,6 +97,9 @@ class Inspection(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     status: InspectionStatus = "draft"
+    prep_hold: bool = True
+    record: dict[str, Any] | None = None
+    overrides: list[dict[str, Any]] = Field(default_factory=list)
 
     @field_validator("inspection_id")
     @classmethod

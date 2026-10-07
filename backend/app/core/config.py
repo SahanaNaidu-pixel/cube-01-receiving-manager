@@ -18,6 +18,10 @@ class Settings(BaseModel):
     demo_mode: bool = False
     openai_base_url: str = ""
     cors_allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"
+    ai_timeout_s: float = 15.0
+    # JSON: {"<api key>": {"organization_id": "...", "operator_id": "...", "role": "operator|approver"}}
+    receiving_api_keys: str = ""
+    seal_key: str = ""
 
 
 @lru_cache
@@ -39,4 +43,7 @@ def get_settings() -> Settings:
         demo_mode=str(os.getenv("DEMO_MODE", "false")).lower() == "true",
         openai_base_url=os.getenv("OPENAI_BASE_URL", ""),
         cors_allowed_origins=os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"),
+        ai_timeout_s=float(os.getenv("AI_TIMEOUT_S", "15")),
+        receiving_api_keys=os.getenv("RECEIVING_API_KEYS", ""),
+        seal_key=os.getenv("RECEIVING_SEAL_KEY", ""),
     )

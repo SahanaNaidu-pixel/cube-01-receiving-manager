@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   analyzeInspection,
   createInspection,
+  fetchInspectionImageUrl,
   getInspection,
-  getInspectionImageUrl,
   overrideInspection,
   uploadInspectionImages,
 } from './services/api';
@@ -26,6 +26,18 @@ const demoScenarios = [
   { value: 'damaged_carton', label: 'Damaged Carton' },
   { value: 'ambiguous', label: 'Ambiguous' },
 ];
+
+function EvidenceImage({ inspectionId, imageId, alt }) {
+  const [src, setSrc] = useState('');
+  useEffect(() => {
+    let url = '';
+    fetchInspectionImageUrl(inspectionId, imageId)
+      .then((value) => { url = value; setSrc(value); })
+      .catch(() => setSrc(''));
+    return () => { if (url) URL.revokeObjectURL(url); };
+  }, [inspectionId, imageId]);
+  return src ? <img src={src} alt={alt} /> : <span>{alt}</span>;
+}
 
 export default function App() {
   const [po, setPo] = useState(defaultPo);
@@ -126,7 +138,7 @@ export default function App() {
 
       if (selectedFiles.length > 0) {
         setUploading(true);
-        const result = await uploadInspectionImages(currentInspectionId, selectedFiles);
+        const result = await uploadInspectionImages(currentInspectionId, selectedFiles, selectedCaptureType);
         const refreshed = await getInspection(currentInspectionId);
         setInspection(refreshed);
         setSelectedFiles([]);
@@ -150,7 +162,9 @@ export default function App() {
         observations: result.observations,
         agent_summary: result.agent_summary || refreshed.agent_summary,
       });
-      setStatus(`Analysis complete. Decision: ${result.decision}`);
+      setStatus(result.failure_reason
+        ? `Held for review: perception unavailable (${result.failure_reason})`
+        : `Analysis complete. Decision: ${result.decision}`);
       appendLog(`Final verdict: ${result.decision}.`);
     } catch (error) {
       setUploadError(error.message || 'Analysis failed.');
@@ -187,9 +201,10 @@ export default function App() {
     PASS: { background: '#dcfce7', color: '#166534', border: '#bbf7d0' },
     EXCEPTION: { background: '#fef2f2', color: '#991b1b', border: '#fecaca' },
     UNCERTAIN: { background: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+    PENDING_REVIEW: { background: '#ede9fe', color: '#5b21b6', border: '#c4b5fd' },
   };
 
-  const currentDecision = inspection?.final_decision || 'UNCERTAIN';
+  const currentDecision = decisionTone[inspection?.final_decision] ? inspection.final_decision : 'UNCERTAIN';
   const agentSteps = [
     { label: 'Create inspection', complete: Boolean(inspectionId) },
     { label: 'Capture evidence', complete: (inspection?.images?.length ?? 0) > 0 || selectedFiles.length > 0 },
@@ -411,8 +426,13 @@ export default function App() {
                     color: decisionTone[currentDecision].color,
                   }}
                 >
-                  {currentDecision}
+                  {currentDecision.replace('_', ' ')}
                 </div>
+                {inspection.record?.outcome?.prep_hold && (
+                  <div className="check-status">
+                    Prep hold: {(inspection.record.outcome.hold_reasons || []).join(', ') || 'yes'}
+                  </div>
+                )}
                 <div className="inspection-meta">
                   <div><span>Inspection ID</span><strong>{inspection.inspection_id}</strong></div>
                   <div><span>PO ID</span><strong>{inspection.po?.po_id}</strong></div>
@@ -426,7 +446,7 @@ export default function App() {
                   {(inspection.checks || []).map((check) => (
                     <div key={check.check_name} className="check-item">
                       <div className="check-name">{check.check_name.replace(/_/g, ' ')}</div>
-                      <div className="check-status">{check.status}</div>
+                      <div className="check-status" title={check.reason}>{check.status.replace('_', ' ')}</div>
                     </div>
                   ))}
                 </div>
@@ -464,7 +484,7 @@ export default function App() {
                 <div className="evidence-grid">
                   {inspection.images.map((image) => (
                     <div key={image.image_id} className="evidence-card">
-                      <img src={getInspectionImageUrl(inspection.inspection_id, image.image_id)} alt={image.filename} />
+                      <EvidenceImage inspectionId={inspection.inspection_id} imageId={image.image_id} alt={image.filename} />
                       <span>{image.filename}</span>
                     </div>
                   ))}
