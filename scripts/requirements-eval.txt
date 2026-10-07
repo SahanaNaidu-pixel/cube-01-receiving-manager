@@ -1,0 +1,6 @@
+# Eval-only dependencies (install into the project venv):
+#   ../.venv/Scripts/python.exe -m pip install -r scripts/requirements-eval.txt
+httpx>=0.27          # scripts/evaluate.py (already a backend dependency)
+Pillow>=10.1         # scripts/make_synthetic_set.py
+# Optional: zxing-cpp  -> make_synthetic_set.py uses its CODE128 writer when importable;
+#                         otherwise a built-in pure-Python CODE128-B encoder is used.
