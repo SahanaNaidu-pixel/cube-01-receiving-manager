@@ -12,32 +12,35 @@
  *
  * NAV_SECTIONS drives the sidebar; `badge` names a key of AppContext.counts (shown when > 0).
  */
-import DashboardPage from './pages/DashboardPage';
-import InspectionsPage from './pages/InspectionsPage';
-import InspectionDetailPage from './pages/InspectionDetailPage';
-import NewInspectionPage from './pages/NewInspectionPage';
-import ReviewQueuePage from './pages/ReviewQueuePage';
-import ReviewDetailPage from './pages/ReviewDetailPage';
-import ExceptionsPage from './pages/ExceptionsPage';
-import IssueDetailPage from './pages/IssueDetailPage';
-import PurchaseOrdersPage from './pages/PurchaseOrdersPage';
-import PurchaseOrderDetailPage from './pages/PurchaseOrderDetailPage';
-import ShipmentsPage from './pages/ShipmentsPage';
-import ShipmentDetailPage from './pages/ShipmentDetailPage';
-import ProductsPage from './pages/ProductsPage';
-import ProductDetailPage from './pages/ProductDetailPage';
-import CartonsPage from './pages/CartonsPage';
-import CartonDetailPage from './pages/CartonDetailPage';
-import EvidencePage from './pages/EvidencePage';
-import EvidenceDetailPage from './pages/EvidenceDetailPage';
-import AuditPage from './pages/AuditPage';
-import AgentActivityPage from './pages/AgentActivityPage';
-import AgentActivityDetailPage from './pages/AgentActivityDetailPage';
-import A2APage from './pages/A2APage';
-import SystemHealthPage from './pages/SystemHealthPage';
-import SettingsPage from './pages/SettingsPage';
-import HelpPage from './pages/HelpPage';
+import { lazy } from 'react';
 import NotFoundPage from './pages/NotFoundPage';
+
+// Pages load on demand (one chunk each) so the initial bundle stays small.
+const DashboardPage = lazy(() => import('./pages/DashboardPage'));
+const InspectionsPage = lazy(() => import('./pages/InspectionsPage'));
+const InspectionDetailPage = lazy(() => import('./pages/InspectionDetailPage'));
+const NewInspectionPage = lazy(() => import('./pages/NewInspectionPage'));
+const ReviewQueuePage = lazy(() => import('./pages/ReviewQueuePage'));
+const ReviewDetailPage = lazy(() => import('./pages/ReviewDetailPage'));
+const ExceptionsPage = lazy(() => import('./pages/ExceptionsPage'));
+const IssueDetailPage = lazy(() => import('./pages/IssueDetailPage'));
+const PurchaseOrdersPage = lazy(() => import('./pages/PurchaseOrdersPage'));
+const PurchaseOrderDetailPage = lazy(() => import('./pages/PurchaseOrderDetailPage'));
+const ShipmentsPage = lazy(() => import('./pages/ShipmentsPage'));
+const ShipmentDetailPage = lazy(() => import('./pages/ShipmentDetailPage'));
+const ProductsPage = lazy(() => import('./pages/ProductsPage'));
+const ProductDetailPage = lazy(() => import('./pages/ProductDetailPage'));
+const CartonsPage = lazy(() => import('./pages/CartonsPage'));
+const CartonDetailPage = lazy(() => import('./pages/CartonDetailPage'));
+const EvidencePage = lazy(() => import('./pages/EvidencePage'));
+const EvidenceDetailPage = lazy(() => import('./pages/EvidenceDetailPage'));
+const AuditPage = lazy(() => import('./pages/AuditPage'));
+const AgentActivityPage = lazy(() => import('./pages/AgentActivityPage'));
+const AgentActivityDetailPage = lazy(() => import('./pages/AgentActivityDetailPage'));
+const A2APage = lazy(() => import('./pages/A2APage'));
+const SystemHealthPage = lazy(() => import('./pages/SystemHealthPage'));
+const SettingsPage = lazy(() => import('./pages/SettingsPage'));
+const HelpPage = lazy(() => import('./pages/HelpPage'));
 
 export const ROUTES = {
   dashboard: { title: 'Dashboard', list: DashboardPage },

@@ -1,7 +1,8 @@
 # Receiving Manager · A2A protocol `cube.a2a.v1`
 
 How other CUBE agents (Prep 02, Recovery 05, Returns, Pack) talk to the Receiving Manager.
-The record carried in results is the organisers' `receiving_record.v1` (`contracts/receiving_record.v1.md`), unchanged.
+The record carried in results is the organisers' `receiving_record.v1` (`contracts/receiving_record.v1.md`): baseline
+fields unchanged, plus extensions (`check_name`, `stage`, `perception`, `intake`, the `carton_condition` check).
 JSON Schemas for every message live in `contracts/` (`a2a_request.v1.schema.json`, `a2a_response.v1.schema.json`,
 `agent_card.v1.schema.json`). This envelope was designed by this pod because the organisers published only the record
 contract; other pods adopting it should raise changes as an Issue labelled `contract`.
@@ -41,7 +42,8 @@ contract; other pods adopting it should raise changes as an Issue labelled `cont
 ```jsonc
 {
   "a2a_version": "cube.a2a.v1",
-  "message_id": "msg-…",                // sender-unique; also used as the idempotency key per sender
+  "message_id": "msg-…",                // sender-unique; (org, sender.agent_id, message_id) is the idempotency key:
+                                        // a repeat returns the stored response with header X-Idempotent-Replay: true
   "correlation_id": "corr-…",           // ties a multi-agent flow together; generated if absent
   "timestamp": "2026-10-08T12:00:00Z",
   "sender":    { "agent_id": "prep_manager", "version": "1.2.0" },
@@ -81,14 +83,16 @@ payload:
   "shipment": { "shipment_id": "…", "supplier": "…", "expected_delivery_date": "YYYY-MM-DD", "warehouse": "…", "asn": "…" },  // optional
   "cartons": [ { "carton_id": "…", "expected_units": 12, "seal_condition": "intact", "visible_condition": "good" } ],  // optional
   "images": [ { "view": "pallet|carton|unit|label|other", "filename": "x.jpg", "content_base64": "…" } ],  // 1..N, same validation as uploads
-  "manual_observations": { /* optional operator counts, same shape as POST /api/inspections/{id}/run */ }
+  "manual_observations": { /* optional operator counts, same shape as POST /api/inspections/{id}/run */ },
+  "scenario": "correct_shipment"        // optional; honoured only when DEMO_MODE=true
 }
 ```
 result: `{ "inspection_id", "verdict": "PASS|FAIL|UNCERTAIN", "decision": "ACCEPT|REJECT|PENDING_REVIEW",
 "prep_hold": bool, "review_task_id": "…"|null, "issues": [ {issue_id, check_key, severity, reason_code} ], "record": <receiving_record.v1> }`
 
 Verdict mapping: `PASS`→`ACCEPT`; `EXCEPTION`→`FAIL`/`REJECT`; `UNCERTAIN` or `PENDING_REVIEW`→`UNCERTAIN`/`PENDING_REVIEW`.
-With no vision provider configured the inspection is still created and sealed, with every perception check
+`VISION_UNAVAILABLE` is reserved in the error enum but not raised today: with no vision provider configured the
+inspection is still created and sealed (`status: completed`), with every perception check
 `UNCERTAIN` (`PERCEPTION_UNAVAILABLE`) and a review task opened — the agent never answers PASS without evidence.
 
 ### `receiving.get_record`
@@ -103,9 +107,11 @@ payload `{}` → result `{ "pong": true, "ready": bool }`.
 ## Outbound hand-off
 
 `POST /api/inspections/{id}/handoff {"target_agent": "prep_manager|recovery_manager|returns_manager|pack_manager"}`
-builds a `receiving.record_available` request envelope carrying the latest record. If `A2A_PEERS`
-(`{"prep_manager": "https://…/api/agent/receive", …}`) names the target, it is POSTed for real (timeout 10 s) and
-the outcome recorded as `delivered` or `failed`; otherwise it is stored as `not_configured` with the exact envelope,
+builds a `receiving.record_available` request envelope carrying the latest record (409 if the inspection has not
+been analysed). If `A2A_PEERS` (`{"prep_manager": "https://…/api/agent/receive"}` or
+`{"prep_manager": {"url": "https://…", "api_key": "…"}}`) names the target, it is POSTed for real (timeout 10 s,
+`X-API-Key` sent when configured) and the outcome recorded as `delivered` (2xx and the peer did not answer
+`status: "failed"`) or `failed`; otherwise it is stored as `not_configured` with the exact envelope,
 so nothing is ever reported as delivered that was not.
 
 ## Activity log

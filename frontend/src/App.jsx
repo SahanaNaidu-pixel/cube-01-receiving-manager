@@ -2,9 +2,10 @@
  * App root: providers → router → landing page (#/) or workspace shell (#/app/…).
  * Pages are registered in routes.js; see src/README.md.
  */
-import { useEffect } from 'react';
+import { Suspense, useEffect } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { ToastProvider } from './components/ui/Toast';
+import { LoadingState } from './components/ui/States';
 import AppShell, { readinessSummary } from './components/AppShell';
 import LandingPage from './components/LandingPage';
 import { canonicalizeHash, navigate, useRoute } from './lib/router';
@@ -38,7 +39,9 @@ function Root() {
   const Page = resolved.component;
   return (
     <AppShell route={route} navKey={resolved.navKey} title={resolved.title}>
-      <Page key={route.path} route={route} />
+      <Suspense fallback={<LoadingState label="Loading page…" />}>
+        <Page key={route.path} route={route} />
+      </Suspense>
     </AppShell>
   );
 }

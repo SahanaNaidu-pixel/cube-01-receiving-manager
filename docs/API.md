@@ -1,7 +1,7 @@
 # Receiving Manager · REST API
 
-Base URL: `VITE_API_BASE_URL` (default `http://localhost:8000`). All `/api/*` routes except the public ones
-need `X-API-Key`. Everything is scoped to the caller's `organization_id`.
+Base URL: `VITE_API_BASE_URL` (dev server default `http://localhost:8000`; production builds without it use the page's
+own origin). All `/api/*` routes except the public ones need `X-API-Key`. Everything is scoped to the caller's `organization_id`.
 
 ## Conventions
 
@@ -94,10 +94,10 @@ Selection: `VISION_PROVIDER=auto|openai|demo|none` (auto: demo if DEMO_MODE, els
 
 ## Issues (exceptions)
 
-Created on every run for each check with verdict FAIL or UNCERTAIN (one per check), and closed as `superseded`
-when a later run replaces them.
+Created on every run for each check with verdict FAIL or UNCERTAIN (one per check). When a later run happens, the
+previous issues still `open`/`in_review` become `superseded` (with `superseded_by_record`); resolved issues are kept.
 `{issue_id "ISS-…", inspection_id, check_key, check_name, issue_type (reason_code), severity: high (FAIL) |
-medium (UNCERTAIN) | low, status: open|in_review|resolved|superseded, title, reason, expected, observed,
+medium (UNCERTAIN), status: open|in_review|resolved|superseded, title, reason, expected, observed,
 evidence_image_ids[], po_id, sku, supplier, assigned_to, notes[], created_at, updated_at, resolved_at, resolved_by}`
 
 | Method | Path | Notes |
@@ -111,7 +111,9 @@ evidence_image_ids[], po_id, sku, supplier, assigned_to, notes[], created_at, up
 ## Review tasks (human review queue)
 
 Opened automatically when a run ends UNCERTAIN or PENDING_REVIEW (reason lists the uncertain checks / failure),
-or manually. One open task per inspection at most (a new run updates the open one's machine snapshot).
+or manually. One open task per inspection at most (a new run updates the open one's machine snapshot and returns it
+to `open`; a run ending PASS or EXCEPTION cancels an automatic task with `resolution: superseded_by_run`, while a
+manual task stays open). A manual request while a task is active → 409.
 `{task_id "REV-…", inspection_id, status: open|evidence_requested|completed|cancelled, reason, trigger:
 uncertain|perception_unavailable|manual, machine_verdict, machine_record_id, human_decision (PASS|FAIL|UNCERTAIN|null),
 decided_by, decided_at, assigned_to, notes[], created_at, updated_at, po_id, sku, supplier}`
@@ -136,7 +138,7 @@ request_id, channel}}`. File bytes: `GET /api/inspections/{id}/images/{image_id}
 
 ## Catalogue, purchase orders, shipments, cartons
 
-- **Products** `{sku (unique per org), asin, product_name, variant, units_per_carton, expected_components[],
+- **Products** `{sku (unique per org), asin, product_name, variant, colour, units_per_carton, expected_components[],
   supplier, created_at, updated_at}` — `GET /api/products` (q, paginated), `POST /api/products` (201; 409 duplicate),
   `GET /api/products/{sku}` (+ `inspections` summary list), `PUT /api/products/{sku}`.
 - **Purchase orders** `{po_number (unique per org), supplier, expected_delivery_date, warehouse, status:
@@ -179,13 +181,13 @@ Counts derive from the latest record per inspection. `product_mismatches` = iden
 `{event_id "AUD-…", organization_id, actor, role, action (e.g. inspection.created, evidence.uploaded,
 inspection.run, inspection.overridden, review.created, review.decided, review.evidence_requested, issue.resolved,
 note.added, a2a.received, a2a.handoff, catalogue.imported), entity_type, entity_id, inspection_id, summary,
-details{}, request_id, correlation_id, created_at}` — append-only (triggers like records).
+details{}, channel (api|a2a), request_id, correlation_id, created_at}` — append-only (triggers like records).
 `GET /api/audit` (filters entity_type, entity_id, inspection_id, action, actor, dates; paginated).
 
 ## Agent
 
 `GET /api/agent/capabilities`, `POST /api/agent/receive`, `GET /api/agent/activity` (filters direction,
 operation, status, agent, correlation_id, dates; paginated), `GET /api/agent/activity/{request_id}` — see `docs/A2A.md`.
-Activity item: `{request_id, correlation_id, message_id, direction: inbound|outbound, agent (sender or target),
+Activity item: `{activity_id, request_id, correlation_id, message_id, direction: inbound|outbound, agent (sender or target),
 operation, status: completed|failed|delivered|not_configured, http_status, latency_ms, inspection_id, error,
 request (envelope, base64 stripped), response, created_at}`.

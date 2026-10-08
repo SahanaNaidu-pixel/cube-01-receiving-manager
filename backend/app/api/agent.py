@@ -45,7 +45,7 @@ async def receive(request: Request, principal: dict = Depends(require_principal)
     response, replayed = await run_in_threadpool(a2a_service.process, principal, envelope, error, correlation_id)
     headers = {"X-Idempotent-Replay": "true"} if replayed else {}
     if replayed and response.get("correlation_id"):
-        correlation_id_var.set(response["correlation_id"])
+        request.state.correlation_id = response["correlation_id"]
     return JSONResponse(response, headers=headers)
 
 

@@ -5,11 +5,14 @@
   "outputDirectory": "frontend/dist",
   "functions": {
     "api/index.py": {
-      "excludeFiles": "{frontend/**,uploads/**,data/**,sample_data/**,submissions/**,docs/**,backend/tests/**}"
+      "excludeFiles": "{frontend/**,uploads/**,sample_data/**,submissions/**,docs/**,backend/tests/**}"
     }
   },
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/index" },
+    { "source": "/.well-known/agent.json", "destination": "/api/index" },
+    { "source": "/health", "destination": "/api/index" },
+    { "source": "/ready", "destination": "/api/index" },
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ]
 }

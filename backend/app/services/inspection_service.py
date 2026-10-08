@@ -88,7 +88,13 @@ def build_agent_summary(inspection: Inspection) -> str:
         return "The receiving agent verified the shipment against the PO and found no material deviations."
 
     if inspection.final_decision == "PENDING_REVIEW":
-        return "Perception was unavailable, so nothing was checked. The shipment is held for manual review."
+        # Operator intake checks (carton condition) still run without perception; say what they found.
+        decided = [check for check in inspection.checks if check.status in ("PASS", "FAIL")]
+        if not decided:
+            return "Perception was unavailable, so nothing was checked. The shipment is held for manual review."
+        found = ", ".join(f"{check.check_name.replace('_check', '').replace('_', ' ')} {check.status}" for check in decided)
+        return (f"Perception was unavailable, so only operator-reported checks ran ({found}). "
+                "The shipment is held for manual review.")
 
     if inspection.final_decision == "EXCEPTION":
         if failed_checks:

@@ -22,5 +22,4 @@ export { default as JsonViewer } from './JsonViewer';
 export { default as FileDropzone, createFileItems, updateFileItem } from './FileDropzone';
 export { default as Timeline, auditEventToItem } from './Timeline';
 export { default as VerdictChart, VERDICT_SERIES } from './VerdictChart';
-export { default as UnderConstruction } from './UnderConstruction';
 export { Icon, ICON_NAMES } from '../Shared';

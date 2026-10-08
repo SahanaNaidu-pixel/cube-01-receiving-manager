@@ -43,6 +43,8 @@ export function AppProvider({ children }) {
   const [apiKey, setKey] = useState(getApiKey);
   const [connection, setConnection] = useState({ state: 'idle', message: 'Not connected', error: null });
   const [connectionVersion, setConnectionVersion] = useState(0);
+  // The key pages fetched with on their last load (on first render: the stored key) and whether it worked.
+  const loadedWith = useRef({ key: getApiKey(), ok: true });
   const [systemInfo, setSystemInfo] = useState(null);
   const [ready, setReady] = useState(null);
   const [readyError, setReadyError] = useState(null);
@@ -95,6 +97,7 @@ export function AppProvider({ children }) {
       setSystemInfo(null);
       setCounts(null);
       setConnectionVersion((v) => v + 1);
+      loadedWith.current = { key: '', ok: false };
       return false;
     }
     setConnection({ state: 'checking', message: 'Connecting…', error: null });
@@ -104,7 +107,9 @@ export function AppProvider({ children }) {
       setSystemInfo(info);
       const who = info?.principal?.operator_id ? ` · ${info.principal.operator_id}` : '';
       setConnection({ state: 'connected', message: `Connected${who}`, error: null });
-      setConnectionVersion((v) => v + 1);
+      // Pages already loaded with this key; re-fetching anyway would reset forms seeded from their data.
+      if (value !== loadedWith.current.key || !loadedWith.current.ok) setConnectionVersion((v) => v + 1);
+      loadedWith.current = { key: value, ok: true };
       refreshCounts();
       return true;
     } catch (err) {
@@ -113,6 +118,7 @@ export function AppProvider({ children }) {
       setCounts(null);
       setConnection({ state: 'error', message: connectionMessage(err), error: err });
       setConnectionVersion((v) => v + 1);
+      loadedWith.current = { key: value, ok: false };
       return false;
     }
   }, [refreshCounts]);

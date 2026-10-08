@@ -42,7 +42,11 @@ export default function AsyncButton({
   const mounted = useRef(true);
   const timer = useRef(null);
 
-  useEffect(() => () => { mounted.current = false; window.clearTimeout(timer.current); }, []);
+  // Set on every mount: StrictMode runs mount → cleanup → mount in dev, so a cleanup-only effect would leave it false.
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; window.clearTimeout(timer.current); };
+  }, []);
 
   const settle = (next) => {
     if (!mounted.current) return;

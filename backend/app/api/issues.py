@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
-from backend.app.api.deps import DateRange, Pagination, eq_ci, require_principal, text_match
+from backend.app.api.deps import DateRange, Pagination, eq_ci, in_ci, require_principal, text_match
 from backend.app.services import inspection_service as svc
 from backend.app.services import issues as issue_service
 
@@ -47,11 +47,9 @@ def list_issues(
     pagination: Pagination = Depends(),
     principal: dict = Depends(require_principal),
 ):
-    statuses = {s.strip().lower() for s in status_.split(",") if s.strip()} if status_ else None
     items = [
         i for i in issue_service.list_for_org(principal["organization_id"])
-        if (statuses is None or i["status"] in statuses)
-        and eq_ci(severity, i["severity"]) and eq_ci(issue_type, i["issue_type"])
+        if in_ci(status_, i["status"]) and in_ci(severity, i["severity"]) and in_ci(issue_type, i["issue_type"])
         and eq_ci(inspection_id, i["inspection_id"]) and eq_ci(sku, i["sku"]) and eq_ci(po, i["po_id"])
         and text_match(q, i["issue_id"], i["inspection_id"], i["title"], i["reason"], i["sku"], i["po_id"],
                        i.get("supplier"), i["issue_type"])

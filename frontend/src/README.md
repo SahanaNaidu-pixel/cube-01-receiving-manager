@@ -18,15 +18,15 @@ src/
   components/AppShell.jsx sidebar, topbar, key panel, mobile drawer, page error boundary
   components/ui/          the component kit (import from 'components/ui')
   components/Shared.jsx   Icon (+ ICON_NAMES), legacy Card/ChecksTable/Gallery/EvidenceImage/VerifyIntegrity…
-  components/*View.jsx    the first UI (Scanner/Ledger/Benchmark/Rules) — not mounted; reuse/absorb, then delete
+  components/DashboardView.jsx, RulesView.jsx   used by the public landing page and Help (rules table)
   pages/                  one file per page
   styles.css              tokens at the top; kit styles at the bottom (prefix .ui-*)
 ```
 
 ## Adding / replacing a page
 
-1. Edit the file in `src/pages/` (placeholders already exist and are registered in `routes.js`). Remove the
-   `<UnderConstruction>` usage.
+1. Create the page in `src/pages/` and register it in `routes.js` (lazy-loaded; add a sidebar entry in
+   `NAV_SECTIONS` if it is a top-level page).
 2. A page receives `{ route }` (`route.params` = decoded path segments, `route.query` = hash query). It is
    re-mounted when the path changes, not when the query changes.
 3. Skeleton:

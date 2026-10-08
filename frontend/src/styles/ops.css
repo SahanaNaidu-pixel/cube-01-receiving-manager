@@ -1,0 +1,122 @@
+/* ═══════════════════════════════════════════════════════════
+   Orders & Stock + Integration pages (src/pages/ops/**, PO/Product/Shipment/Carton/Agent/A2A pages).
+   Every rule is prefixed .ops-; colours come from the theme tokens in styles.css (light + dark).
+   ═══════════════════════════════════════════════════════════ */
+
+.ops-stack-sm { display: grid; gap: 12px; min-width: 0; }
+.ops-cell-stack { display: grid; gap: 2px; }
+.ops-chip-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.ops-nowrap { flex-wrap: nowrap; white-space: nowrap; }
+.ops-self-start { justify-self: start; }
+.ops-neg { color: var(--red); font-weight: 700; }
+.ops-pos { color: var(--amber); font-weight: 700; }
+.ops-error-text { color: var(--red); font-size: 12px; overflow-wrap: anywhere; }
+.ops-toolbar { display: flex; flex-wrap: wrap; gap: 10px; padding: 12px 22px; border-bottom: 1px solid var(--border); }
+.ops-toolbar .segmented-control { flex-wrap: wrap; }
+
+/* inline action links rendered as buttons */
+.ops-inline-btn { display: inline-flex; align-items: center; gap: 5px; text-decoration: none; white-space: nowrap; }
+
+/* forms */
+.ops-req { color: var(--red); }
+.ops-invalid, .ops-invalid:focus { border-color: var(--red) !important; box-shadow: 0 0 0 3px var(--red-bg) !important; }
+.ops-field-error { color: var(--red); font-size: 11.5px; font-weight: 600; }
+.ops-form .field { display: grid; gap: 6px; }
+.ops-text-filter .filter-input { min-width: 150px; max-width: 220px; }
+.ops-lines { display: grid; gap: 10px; }
+.ops-lines-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; }
+.ops-line-table td { padding: 6px 6px; vertical-align: top; }
+.ops-line-table th { white-space: nowrap; }
+.ops-line-table input, .ops-line-table select { padding: 6px 8px; }
+.ops-w-xs { min-width: 64px; }
+.ops-w-sm { min-width: 96px; }
+.ops-w-md { min-width: 150px; }
+.ops-grid-2 { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.ops-inline-field { display: inline-flex; align-items: center; gap: 6px; }
+.ops-inline-field .filter-select { padding: 4px 8px; min-width: 0; }
+.ops-id-field { display: flex; gap: 6px; align-items: center; }
+.ops-id-field .ui-icon-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent2); }
+.ops-json-input { font-family: 'JetBrains Mono', monospace !important; font-size: 12px !important; line-height: 1.5; tab-size: 2; white-space: pre; }
+.ops-warn-list { margin: 6px 0 0 18px; padding: 0; font-size: 12.5px; }
+.ops-details { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 14px; background: var(--bg3); }
+.ops-details > summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--text2); }
+.ops-details[open] > summary { margin-bottom: 12px; }
+.ops-send-row { align-items: center; }
+
+/* import result */
+.ops-import-result { display: grid; gap: 12px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--green) 35%, transparent); border-radius: var(--radius-sm); background: var(--green-bg); }
+.ops-import-title { display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--green); }
+
+/* verdict counters */
+.ops-verdict-counts { display: inline-flex; gap: 10px; align-items: center; font-size: 12px; font-weight: 700; }
+.ops-verdict-counts .ops-vc { display: inline-flex; align-items: center; gap: 4px; background: none; border: 0; padding: 0; color: var(--text2); }
+.ops-verdict-counts .ops-vc i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.ops-verdict-counts .ops-vc.v-PASS i { background: var(--green); }
+.ops-verdict-counts .ops-vc.v-FAIL i { background: var(--red); }
+.ops-verdict-counts .ops-vc.v-UNCERTAIN i { background: var(--amber); }
+.ops-verdict-counts .ops-vc.v-NOT_ANALYZED i { background: var(--text3); }
+.ops-verdict-counts .ops-vc.is-zero { opacity: 0.4; }
+
+/* evidence thumbnails */
+.ops-thumbs { display: flex; flex-wrap: wrap; gap: 14px; }
+.ops-thumb { display: grid; gap: 6px; margin: 0; }
+.ops-thumb-frame { display: grid; place-items: center; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg3); }
+.ops-thumb-frame img { width: 100%; height: 100%; object-fit: cover; }
+.ops-thumb-frame:hover { border-color: var(--accent); }
+.ops-thumb-error { display: inline-flex; gap: 4px; align-items: center; font-size: 11px; color: var(--red); }
+.ops-thumb figcaption { font-size: 11px; color: var(--text3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* envelopes / exchanges */
+.ops-envelopes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.ops-envelopes > .card { margin: 0; min-width: 0; }
+.ops-exchange { min-width: 0; }
+.ops-exchange-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.ops-exchange-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 12px; color: var(--text3); }
+.ops-exchange-meta strong { color: var(--text); }
+.ops-exchange-meta .mono { color: var(--text2); overflow-wrap: anywhere; }
+.ops-delivery { font-size: 12px; padding: 4px 11px; }
+.ops-waiting { display: flex; align-items: center; gap: 10px; padding: 18px; color: var(--text3); font-size: 13px; border: 1px dashed var(--border2); border-radius: var(--radius-sm); }
+.ops-curl { display: grid; gap: 10px; }
+.ops-pre { margin: 0; padding: 12px 14px; max-height: 260px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg3); color: var(--text2); font: 12px/1.55 'JetBrains Mono', monospace; white-space: pre-wrap; word-break: break-all; }
+.ops-console { display: grid; gap: 20px; }
+
+/* agent card */
+.ops-source-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; font-size: 12.5px; }
+.ops-op-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.ops-op { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; display: grid; gap: 10px; }
+.ops-op-head { display: flex; align-items: baseline; gap: 10px; width: 100%; padding: 4px 0; border: 0; background: none; color: var(--text); text-align: left; cursor: pointer; font: inherit; }
+.ops-op-name { font-weight: 700; color: var(--accent2); white-space: nowrap; }
+
+/* guided demo steps */
+.ops-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+.ops-step { display: grid; gap: 14px; padding: 16px 18px; border: 1px solid var(--border); border-left: 4px solid var(--border2); border-radius: var(--radius); background: var(--bg2); min-width: 0; }
+.ops-step.is-running { border-left-color: var(--blue); }
+.ops-step.is-ok { border-left-color: var(--green); }
+.ops-step.is-failed { border-left-color: var(--red); }
+.ops-step-head { display: flex; align-items: center; gap: 14px; }
+.ops-step-num { flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--bg3); border: 1px solid var(--border2); font-weight: 800; font-size: 13px; color: var(--text2); }
+.ops-step.is-ok .ops-step-num { background: var(--green-bg); border-color: transparent; color: var(--green); }
+.ops-step.is-failed .ops-step-num { background: var(--red-bg); border-color: transparent; color: var(--red); }
+.ops-step-text { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.ops-result-hero { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; font-size: 14px; }
+.ops-result-hero .verdict-badge { font-size: 14px; padding: 5px 14px; }
+
+/* regression */
+.ops-score { margin: 0; font-weight: 700; font-size: 14px; }
+.ops-score.ok { color: var(--green); }
+.ops-score.bad { color: var(--red); }
+
+@media (max-width: 900px) {
+  .ops-envelopes { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 640px) {
+  .ops-toolbar { padding: 10px 14px; }
+  .ops-text-filter .filter-input { max-width: none; width: 100%; }
+  .ops-text-filter { flex: 1 1 100%; }
+  .ops-step { padding: 14px; }
+  .ops-step-head { flex-wrap: wrap; }
+  .ops-step-head > button { width: 100%; justify-content: center; }
+  .ops-op-head { flex-wrap: wrap; }
+  .ops-verdict-counts { gap: 7px; }
+}

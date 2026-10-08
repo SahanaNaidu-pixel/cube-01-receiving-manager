@@ -124,9 +124,9 @@ def list_inspections(
 ):
     if sort not in SORT_KEYS:
         raise AppError(422, f"sort must be one of {', '.join(sorted(SORT_KEYS))}", "VALIDATION_ERROR")
-    verdict_filter = verdict.strip().upper() if verdict else None
-    if verdict_filter and verdict_filter not in {"PASS", "FAIL", "UNCERTAIN", "NOT_ANALYZED"}:
-        raise AppError(422, "verdict must be PASS, FAIL, UNCERTAIN or NOT_ANALYZED", "VALIDATION_ERROR")
+    verdict_filter = {v.strip().upper() for v in verdict.split(",") if v.strip()} if verdict else None
+    if verdict_filter and not verdict_filter <= {"PASS", "FAIL", "UNCERTAIN", "NOT_ANALYZED"}:
+        raise AppError(422, "verdict must be PASS, FAIL, UNCERTAIN or NOT_ANALYZED (comma-separated allowed)", "VALIDATION_ERROR")
     org = principal["organization_id"]
     ctx = svc.OrgContext(org)
     views = []
@@ -136,7 +136,7 @@ def list_inspections(
         if not text_match(q, inspection.inspection_id, inspection.po.po_id, inspection.po.sku, inspection.po.product_name,
                           ship.supplier if ship else None, ship.shipment_id if ship else None):
             continue
-        if verdict_filter and (view["verdict"] or "NOT_ANALYZED") != verdict_filter:
+        if verdict_filter and (view["verdict"] or "NOT_ANALYZED") not in verdict_filter:
             continue
         if not eq_ci(status_, inspection.status) or not eq_ci(sku, inspection.po.sku) or not eq_ci(po, inspection.po.po_id):
             continue

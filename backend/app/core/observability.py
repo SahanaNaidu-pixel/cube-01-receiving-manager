@@ -88,7 +88,7 @@ class RequestContextMiddleware:
                 status_holder["status"] = message["status"]
                 raw = [(k, v) for k, v in message.get("headers", []) if k.lower() not in (b"x-request-id", b"x-correlation-id")]
                 raw.append((b"x-request-id", request_id.encode("latin-1")))
-                raw.append((b"x-correlation-id", (correlation_id_var.get() or correlation_id).encode("latin-1")))
+                raw.append((b"x-correlation-id", (state.get("correlation_id") or correlation_id).encode("latin-1")))
                 message = {**message, "headers": raw}
             await send(message)
 
@@ -101,4 +101,5 @@ class RequestContextMiddleware:
                 "status": status_holder["status"],
                 "latency_ms": round((time.perf_counter() - started) * 1000, 2),
                 "operator_id": state.get("operator_id") or operator_id_var.get(),
+                "correlation_id": state.get("correlation_id") or correlation_id,
             }})

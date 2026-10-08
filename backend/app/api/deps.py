@@ -158,3 +158,11 @@ def eq_ci(filter_value: str | None, value) -> bool:
     if not filter_value:
         return True
     return value is not None and str(value).strip().lower() == filter_value.strip().lower()
+
+
+def in_ci(filter_value: str | None, value) -> bool:
+    """Comma-separated, case-insensitive membership filter (e.g. status=open,in_review)."""
+    if not filter_value:
+        return True
+    wanted = {v.strip().lower() for v in filter_value.split(",") if v.strip()}
+    return not wanted or (value is not None and str(value).strip().lower() in wanted)

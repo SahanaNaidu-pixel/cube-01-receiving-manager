@@ -13,7 +13,9 @@ COPY index.html vite.config.js ./
 COPY src ./src
 
 # Vite inlines VITE_* variables at build time, so the backend URL must be passed as a build arg.
-ARG VITE_API_BASE_URL=http://localhost:8000
+# No default: an image must never silently call localhost in production.
+ARG VITE_API_BASE_URL
+RUN test -n "$VITE_API_BASE_URL" || { echo "Set --build-arg VITE_API_BASE_URL=https://your-backend-domain.com" >&2; exit 1; }
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 RUN npm run build
 
