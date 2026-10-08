@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
@@ -53,6 +54,138 @@ CREATE TRIGGER IF NOT EXISTS overrides_no_delete BEFORE DELETE ON overrides
 BEGIN SELECT RAISE(ABORT, 'overrides are append-only'); END;
 """
 
+# JSON-document tables (one JSON blob per row), all scoped by organization_id.
+# ref = secondary lookup key (audit: entity_id, activity: request_id); idem = idempotency key (A2A inbound).
+DOC_TABLES = ("issues", "review_tasks", "audit_events", "agent_activity", "products", "purchase_orders", "notes")
+APPEND_ONLY_DOC_TABLES = ("audit_events",)
+
+
+def _doc_schema() -> str:
+    parts = []
+    for name in DOC_TABLES:
+        parts.append(f"""
+CREATE TABLE IF NOT EXISTS {name} (
+    organization_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    inspection_id TEXT,
+    status TEXT,
+    kind TEXT,
+    ref TEXT,
+    idem TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (organization_id, id)
+);
+CREATE INDEX IF NOT EXISTS ix_{name}_created ON {name} (organization_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_{name}_inspection ON {name} (organization_id, inspection_id);
+CREATE INDEX IF NOT EXISTS ix_{name}_ref ON {name} (organization_id, ref);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_{name}_idem ON {name} (organization_id, idem);""")
+    for name in APPEND_ONLY_DOC_TABLES:
+        parts.append(f"""
+CREATE TRIGGER IF NOT EXISTS {name}_no_update BEFORE UPDATE ON {name}
+BEGIN SELECT RAISE(ABORT, '{name} are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS {name}_no_delete BEFORE DELETE ON {name}
+BEGIN SELECT RAISE(ABORT, '{name} are append-only'); END;""")
+    return "\n".join(parts)
+
+
+FULL_SCHEMA = SCHEMA + _doc_schema()
+_initialized: set[str] = set()
+_init_lock = threading.Lock()
+
+
+def connect() -> sqlite3.Connection:
+    """Open a connection; the schema (idempotent CREATE IF NOT EXISTS) and WAL are applied once per DB file."""
+    path = _db_path()
+    conn = sqlite3.connect(path, isolation_level=None, timeout=10)
+    if path not in _initialized or not Path(path).exists():
+        with _init_lock:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.executescript(FULL_SCHEMA)
+            _initialized.add(path)
+    return conn
+
+
+def schema_ok() -> tuple[bool, str]:
+    """Readiness probe: SELECT 1 and every expected table present."""
+    with closing(connect()) as conn:
+        conn.execute("SELECT 1").fetchone()
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    missing = [t for t in ("inspections", "records", "overrides", *DOC_TABLES) if t not in names]
+    return (not missing), ("missing tables: " + ", ".join(missing)) if missing else "ok"
+
+
+class DocumentTable:
+    """Small JSON-document table helper. Every call is scoped by organization_id."""
+
+    def __init__(self, name: str):
+        assert name in DOC_TABLES
+        self.name = name
+
+    def insert(self, organization_id: str, doc_id: str, data: dict, *, created_at: str, updated_at: str | None = None,
+               inspection_id: str | None = None, status: str | None = None, kind: str | None = None,
+               ref: str | None = None, idem: str | None = None) -> dict:
+        with closing(connect()) as conn:
+            conn.execute(
+                f"INSERT INTO {self.name} (organization_id, id, inspection_id, status, kind, ref, idem, created_at, updated_at, data) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (organization_id, doc_id, inspection_id, status, kind, ref, idem, created_at, updated_at or created_at,
+                 json.dumps(data, default=str)),
+            )
+        return data
+
+    def upsert(self, organization_id: str, doc_id: str, data: dict, *, created_at: str, updated_at: str | None = None,
+               inspection_id: str | None = None, status: str | None = None, kind: str | None = None,
+               ref: str | None = None) -> dict:
+        if self.name in APPEND_ONLY_DOC_TABLES:
+            raise ValueError(f"{self.name} is append-only")
+        with closing(connect()) as conn:
+            conn.execute(
+                f"INSERT INTO {self.name} (organization_id, id, inspection_id, status, kind, ref, idem, created_at, updated_at, data) "
+                "VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?) "
+                "ON CONFLICT (organization_id, id) DO UPDATE SET inspection_id = excluded.inspection_id, "
+                "status = excluded.status, kind = excluded.kind, ref = excluded.ref, "
+                "updated_at = excluded.updated_at, data = excluded.data",
+                (organization_id, doc_id, inspection_id, status, kind, ref, created_at, updated_at or created_at,
+                 json.dumps(data, default=str)),
+            )
+        return data
+
+    def get(self, organization_id: str, doc_id: str) -> dict | None:
+        with closing(connect()) as conn:
+            row = conn.execute(f"SELECT data FROM {self.name} WHERE organization_id = ? AND id = ?",
+                               (organization_id, doc_id)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def find(self, organization_id: str, **equals) -> list[dict]:
+        """Rows matching indexed columns (inspection_id, status, kind, ref, idem), oldest first."""
+        allowed = {"inspection_id", "status", "kind", "ref", "idem"}
+        where, params = ["organization_id = ?"], [organization_id]
+        for column, value in equals.items():
+            if column not in allowed:
+                raise ValueError(column)
+            if value is not None:
+                where.append(f"{column} = ?")
+                params.append(value)
+        with closing(connect()) as conn:
+            rows = conn.execute(f"SELECT data FROM {self.name} WHERE {' AND '.join(where)} ORDER BY created_at, rowid",
+                                params).fetchall()
+        return [json.loads(r[0]) for r in rows]
+
+    def count(self) -> int:
+        with closing(connect()) as conn:
+            return conn.execute(f"SELECT COUNT(*) FROM {self.name}").fetchone()[0]
+
+
+issues_table = DocumentTable("issues")
+review_tasks_table = DocumentTable("review_tasks")
+audit_table = DocumentTable("audit_events")
+activity_table = DocumentTable("agent_activity")
+products_table = DocumentTable("products")
+purchase_orders_table = DocumentTable("purchase_orders")
+notes_table = DocumentTable("notes")
+
 
 def _db_path() -> str:
     """Only file-backed sqlite:/// URLs. Relative paths resolve against the repo root, not the CWD."""
@@ -70,9 +203,7 @@ class InspectionRepository:
         _db_path()  # fail fast on an unsupported DATABASE_URL
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(_db_path(), isolation_level=None, timeout=10)
-        conn.executescript(SCHEMA)
-        return conn
+        return connect()
 
     def create(self, inspection: Inspection) -> Inspection:
         with closing(self._connect()) as conn:

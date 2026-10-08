@@ -67,7 +67,7 @@ def _jpeg_bytes() -> bytes:
 
 def _create_inspection(po=None, headers=A):
     response = client.post("/api/inspections", json={"po": po or PO}, headers=headers)
-    assert response.status_code == 200, response.text
+    assert response.status_code == 201, response.text  # docs/API.md: create returns 201
     return response.json()
 
 
@@ -395,7 +395,8 @@ def test_model_timeout_goes_to_pending_review(monkeypatch):
     body = response.json()
     assert body["decision"] == "PENDING_REVIEW"
     assert "TimeoutError" in body["failure_reason"]
-    assert all(c["status"] == "UNCERTAIN" for c in body["checks"])
+    # carton_condition comes from the intake carton list (none here -> NOT_REQUIRED), not from perception.
+    assert all(c["status"] == "UNCERTAIN" for c in body["checks"] if c["check_name"] != "carton_condition_check")
 
 
 def test_missing_api_key_goes_to_pending_review(monkeypatch):

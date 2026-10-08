@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "receiving_record.v1.schema.json",
+  "title": "Receiving record v1",
+  "description": "Machine-readable form of contracts/receiving_record.v1.md. Baseline fields are required and must not be renamed or dropped; extra (extension) fields are allowed everywhere.",
+  "type": "object",
+  "required": ["record_id", "schema_version", "organization_id", "created_at", "subject", "images", "checks", "outcome", "overrides", "status", "content_hash", "seal"],
+  "additionalProperties": true,
+  "$defs": {
+    "timestamp": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verdict": {"enum": ["PASS", "FAIL", "UNCERTAIN", "NOT_REQUIRED"]},
+    "nullableText": {"type": ["string", "null"]}
+  },
+  "properties": {
+    "record_id": {"type": "string", "pattern": "^RCV-"},
+    "schema_version": {"const": "receiving_record.v1"},
+    "organization_id": {"type": "string", "minLength": 1},
+    "created_at": {"$ref": "#/$defs/timestamp"},
+    "subject": {
+      "type": "object",
+      "required": ["unit_id", "sku", "asin", "po_number", "po_line"],
+      "additionalProperties": true,
+      "properties": {
+        "unit_id": {"$ref": "#/$defs/nullableText"},
+        "sku": {"type": "string", "minLength": 1},
+        "asin": {"$ref": "#/$defs/nullableText"},
+        "po_number": {"type": "string", "minLength": 1},
+        "po_line": {"type": ["integer", "string", "null"]}
+      }
+    },
+    "images": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["image_id", "view", "sha256_digest"],
+        "additionalProperties": true,
+        "properties": {
+          "image_id": {"type": "string", "minLength": 1},
+          "view": {"enum": ["pallet", "carton", "unit", "label", "other"]},
+          "sha256_digest": {"type": "string"}
+        }
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check_key", "verdict", "observed_state", "expected_state", "reason_code", "measurements", "model_version", "rule_ids", "image_ids"],
+        "additionalProperties": true,
+        "properties": {
+          "check_key": {
+            "description": "Baseline keys from the contract plus the documented extension 'carton_condition' (operator-reported intake carton condition).",
+            "enum": ["identity", "carton_count", "units_per_carton", "total_quantity", "carton_damage", "unit_damage", "colour", "variant", "components", "carton_condition"]
+          },
+          "verdict": {"$ref": "#/$defs/verdict"},
+          "observed_state": {"description": "What was seen; null when nothing was seen (never the PO value)."},
+          "expected_state": {},
+          "reason_code": {"type": "string"},
+          "measurements": {"type": "object"},
+          "model_version": {"type": "string", "minLength": 1},
+          "rule_ids": {"type": "array", "items": {"type": "string"}},
+          "image_ids": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "required": ["decision", "disposition", "prep_hold", "hold_reasons"],
+      "additionalProperties": true,
+      "properties": {
+        "decision": {"enum": ["ACCEPT", "REJECT", "PENDING_REVIEW"]},
+        "disposition": {"type": "string"},
+        "prep_hold": {"type": "boolean"},
+        "hold_reasons": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "overrides": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["override_id", "check_key", "from_verdict", "to_verdict", "reason", "operator_id", "created_at", "prev_content_hash", "new_content_hash"],
+        "additionalProperties": true,
+        "properties": {
+          "override_id": {"type": "string"},
+          "check_key": {"type": ["string", "null"], "description": "null = whole-shipment override"},
+          "from_verdict": {"type": "string"},
+          "to_verdict": {"type": "string"},
+          "reason": {"type": "string", "minLength": 1},
+          "operator_id": {"type": "string", "minLength": 1},
+          "created_at": {"$ref": "#/$defs/timestamp"},
+          "prev_content_hash": {"$ref": "#/$defs/hash"},
+          "new_content_hash": {"$ref": "#/$defs/hash"}
+        }
+      }
+    },
+    "status": {"enum": ["final", "pending"]},
+    "content_hash": {"$ref": "#/$defs/hash"},
+    "seal": {"$ref": "#/$defs/hash"}
+  }
+}

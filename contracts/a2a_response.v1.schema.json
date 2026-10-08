@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2a_response.v1.schema.json",
+  "title": "CUBE A2A response envelope (cube.a2a.v1)",
+  "description": "Always this shape. HTTP 200 for completed and for failed-in-protocol; 4xx/5xx only for transport or auth errors (those use the REST error envelope).",
+  "type": "object",
+  "required": ["a2a_version", "message_id", "in_reply_to", "correlation_id", "request_id", "timestamp", "sender", "operation", "status", "result", "error"],
+  "additionalProperties": false,
+  "properties": {
+    "a2a_version": {"const": "cube.a2a.v1"},
+    "message_id": {"type": "string", "minLength": 1},
+    "in_reply_to": {"type": ["string", "null"], "description": "Request message_id; null only when the request had no usable message_id."},
+    "correlation_id": {"type": "string", "minLength": 1},
+    "request_id": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"},
+    "sender": {
+      "type": "object",
+      "required": ["agent_id", "version"],
+      "properties": {"agent_id": {"type": "string"}, "version": {"type": "string"}}
+    },
+    "operation": {"type": ["string", "null"]},
+    "status": {"enum": ["completed", "failed"]},
+    "result": {"type": ["object", "null"]},
+    "error": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["code", "message", "retryable", "details"],
+          "additionalProperties": false,
+          "properties": {
+            "code": {"enum": ["VALIDATION_ERROR", "NOT_FOUND", "UNSUPPORTED_OPERATION", "UNAUTHORIZED", "VISION_UNAVAILABLE", "INTERNAL_ERROR"]},
+            "message": {"type": "string", "minLength": 1},
+            "retryable": {"type": "boolean"},
+            "details": {"type": "object"}
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "completed"}}},
+      "then": {"properties": {"result": {"type": "object"}, "error": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "failed"}}},
+      "then": {"properties": {"result": {"type": "null"}, "error": {"type": "object"}}}
+    }
+  ]
+}

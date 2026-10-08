@@ -27,6 +27,14 @@ class Settings(BaseModel):
     # JSON: {"<api key>": {"organization_id": "...", "operator_id": "...", "role": "operator|approver"}}
     receiving_api_keys: str = ""
     seal_key: str = ""
+    # auto | openai | demo | none (auto: demo if DEMO_MODE, else openai if a key is set, else none)
+    vision_provider: str = "auto"
+    # fail | review: under review, visible damage gives UNCERTAIN (DAMAGE_REVIEW_REQUIRED) instead of FAIL
+    damage_policy: str = "fail"
+    # JSON {"prep_manager": "https://.../api/agent/receive"} or {"prep_manager": {"url": "...", "api_key": "..."}}
+    a2a_peers: str = ""
+    agent_id: str = "receiving_manager"
+    app_version: str = "1.0.0"
 
 
 @lru_cache
@@ -57,4 +65,9 @@ def get_settings() -> Settings:
         ai_timeout_s=float(os.getenv("AI_TIMEOUT_S", "45")),
         receiving_api_keys=os.getenv("RECEIVING_API_KEYS", ""),
         seal_key=os.getenv("RECEIVING_SEAL_KEY", ""),
+        vision_provider=(os.getenv("VISION_PROVIDER", "auto") or "auto").strip().lower(),
+        damage_policy="review" if (os.getenv("DAMAGE_POLICY", "fail") or "").strip().lower() == "review" else "fail",
+        a2a_peers=os.getenv("A2A_PEERS", ""),
+        agent_id=(os.getenv("AGENT_ID", "receiving_manager") or "receiving_manager").strip(),
+        app_version=os.getenv("APP_VERSION", "1.0.0") or "1.0.0",
     )

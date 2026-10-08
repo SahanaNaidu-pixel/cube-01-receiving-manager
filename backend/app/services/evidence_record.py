@@ -25,6 +25,7 @@ CHECK_KEYS = {
     "sku_check": "identity", "carton_check": "carton_count", "units_per_carton_check": "units_per_carton",
     "quantity_check": "total_quantity", "variant_check": "variant", "damage_check": "carton_damage",
     "component_check": "components",
+    "carton_condition_check": "carton_condition",  # contract extension: operator-reported carton condition
 }
 RULES_ONLY_CODES = {"NOT_REQUIRED", "PO_FIELD_MISSING", "PO_INCONSISTENT"}
 EPHEMERAL_MESSAGE = "sealed with an ephemeral key from a previous process; set RECEIVING_SEAL_KEY"
@@ -107,14 +108,18 @@ def _hold_reasons(record_checks: list[dict]) -> list[str]:
 
 
 def _check_model_version(c: dict, model_version: str) -> str:
+    if c.get("check_name") == "carton_condition_check":
+        return "operator"  # from the intake carton list, never from the model
     if c.get("reason_code") in RULES_ONLY_CODES or c.get("measurements", {}).get("derived"):
         return "rules"  # decided from the PO or arithmetic, not read by the model
+    if c.get("measurements", {}).get("sources") == ["operator"]:
+        return "operator"  # decided only from the operator's manual observations
     return model_version
 
 
 def build_record(*, inspection, verdict: str, checks: list[dict], model_version: str, operator: dict,
                  version: int, previous: dict | None, status: str, failure_reason: str | None = None,
-                 evidence: list[dict] | None = None) -> dict:
+                 evidence: list[dict] | None = None, extensions: dict | None = None) -> dict:
     decision, disposition = OUTCOME[verdict]
     image_of = {e["evidence_id"]: e["image_id"] for e in evidence or []}
     record_checks = [
@@ -127,7 +132,7 @@ def build_record(*, inspection, verdict: str, checks: list[dict], model_version:
             "reason_code": c.get("reason_code", ""),
             "reason": c["reason"],
             "measurements": c.get("measurements", {}),
-            "image_ids": sorted({image_of[e] for e in c.get("evidence_ids", []) if e in image_of}),
+            "image_ids": sorted({image_of[e] for e in c.get("evidence_ids", []) if e in image_of and image_of[e] != "operator"}),
             "evidence_ids": c.get("evidence_ids", []),
             "model_version": _check_model_version(c, model_version),
             "rule_ids": [_rule_id(c["check_name"])],
@@ -164,6 +169,8 @@ def build_record(*, inspection, verdict: str, checks: list[dict], model_version:
         "analyzed_by": operator["operator_id"],
         "created_at": now_rfc3339(),
     }
+    for key, value in (extensions or {}).items():  # contract extensions only; never replace baseline fields
+        record.setdefault(key, value)
     return seal(record)
 
 

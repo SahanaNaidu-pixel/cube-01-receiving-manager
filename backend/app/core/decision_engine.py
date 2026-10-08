@@ -175,3 +175,55 @@ def evaluate_variant_check(expected_variant, observed_variant):
     if observed == expected:
         return _result("PASS", "Observed variant matches the expected variant.", "MATCH")
     return _result("FAIL", f"Variant mismatch: expected {expected_variant}, observed {observed_variant}.", "VARIANT_MISMATCH")
+
+
+BAD_SEALS = {"broken", "resealed"}
+UNKNOWN_CONDITION = {"unknown", "", None}
+
+
+def apply_damage_policy(result: dict, policy: str) -> dict:
+    """DAMAGE_POLICY=review turns visible damage (FAIL) into UNCERTAIN DAMAGE_REVIEW_REQUIRED for a human."""
+    if policy == "review" and result.get("status") == "FAIL":
+        return _result("UNCERTAIN", result["reason"] + " Held for human review (DAMAGE_POLICY=review).", "DAMAGE_REVIEW_REQUIRED")
+    return result
+
+
+def evaluate_carton_condition_check(cartons, policy: str = "fail") -> dict:
+    """Operator-reported carton condition from intake. Contract extension check_key 'carton_condition'.
+
+    Any broken/resealed seal or visible condition other than good/unknown -> FAIL (UNCERTAIN under review);
+    all intact and good -> PASS; nothing known -> UNCERTAIN; no cartons -> NOT_REQUIRED.
+    """
+    cartons = list(cartons or [])
+    if not cartons:
+        return _result("NOT_REQUIRED", "No cartons were recorded at intake.", "NOT_REQUIRED")
+
+    def field(c, name):
+        value = c.get(name) if isinstance(c, dict) else getattr(c, name, None)
+        return (str(value).strip().lower() if value is not None else None) or None
+
+    bad = []
+    all_known_good = True
+    any_known = False
+    for c in cartons:
+        seal, visible = field(c, "seal_condition"), field(c, "visible_condition")
+        cid = (c.get("carton_id") if isinstance(c, dict) else getattr(c, "carton_id", None)) or "?"
+        problems = []
+        if seal in BAD_SEALS:
+            problems.append(f"seal {seal}")
+        if visible not in UNKNOWN_CONDITION and visible != "good":
+            problems.append(visible)
+        if problems:
+            bad.append(f"{cid} ({', '.join(problems)})")
+        if seal not in UNKNOWN_CONDITION or visible not in UNKNOWN_CONDITION:
+            any_known = True
+        if seal != "intact" or visible != "good":
+            all_known_good = False
+    if bad:
+        result = _result("FAIL", f"Carton condition reported at intake: {'; '.join(bad)}.", "CARTON_CONDITION_REPORTED")
+        return apply_damage_policy(result, policy)
+    if all_known_good:
+        return _result("PASS", "Every carton was recorded intact and in good condition.", "MATCH")
+    if not any_known:
+        return _result("UNCERTAIN", "Carton condition was not recorded for any carton.", "NOT_OBSERVED")
+    return _result("UNCERTAIN", "Carton condition was not recorded for every carton.", "NOT_OBSERVED")

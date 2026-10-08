@@ -1,7 +1,7 @@
 import { Fragment } from 'react';
 import { Card, Icon } from './Shared';
 
-const RULES = [
+export const RULES = [
   {
     title: 'Decision aggregation',
     icon: 'list',

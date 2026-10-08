@@ -252,7 +252,9 @@ def test_record_contract_fields_and_override_hashes(monkeypatch):
     record = client.post(f"/api/inspections/{iid}/analyze", params={"scenario": "damaged_carton"}, headers=A).json()["record"]
     assert record["schema_version"] == "receiving_record.v1" and record["status"] == "final"
     keys = {c["check_key"] for c in record["checks"]}
-    assert keys == {"identity", "carton_count", "units_per_carton", "total_quantity", "variant", "carton_damage", "components"}
+    # carton_condition is the docs/API.md contract extension (operator-reported carton condition; NOT_REQUIRED here).
+    assert keys == {"identity", "carton_count", "units_per_carton", "total_quantity", "variant", "carton_damage", "components",
+                    "carton_condition"}
     damage = next(c for c in record["checks"] if c["check_key"] == "carton_damage")
     assert damage["image_ids"] == [image_id]
     assert record["outcome"]["hold_reasons"] == ["carton_damage:FAIL"]

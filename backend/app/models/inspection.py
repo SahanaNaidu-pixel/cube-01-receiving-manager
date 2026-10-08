@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .evidence import Evidence
+from .intake import Carton, ManualObservations, Shipment
 from .po import PurchaseOrder
 
 InspectionStatus = Literal["draft", "pending", "completed"]
@@ -28,6 +29,10 @@ class ReceivingImage(BaseModel):
     sha256_digest: str = ""
     processing_state: Literal["uploaded", "ready", "analyzing", "analyzed", "failed"] = "uploaded"
     uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # Provenance (optional so rows stored before these fields existed still load).
+    source: Literal["upload", "a2a"] = "upload"
+    uploaded_by: str | None = None
+    request_id: str | None = None
 
     @field_validator("image_id", "inspection_id", "filename", "stored_filename", "image_path")
     @classmethod
@@ -100,6 +105,12 @@ class Inspection(BaseModel):
     prep_hold: bool = True
     record: dict[str, Any] | None = None
     overrides: list[dict[str, Any]] = Field(default_factory=list)
+    # Intake extensions (all optional; older rows load with defaults).
+    shipment: Shipment | None = None
+    cartons: list[Carton] = Field(default_factory=list)
+    manual_observations: ManualObservations | None = None
+    created_by: str | None = None
+    channel: Literal["api", "a2a"] = "api"
 
     @field_validator("inspection_id")
     @classmethod

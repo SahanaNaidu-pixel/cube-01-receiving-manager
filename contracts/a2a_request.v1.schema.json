@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "a2a_request.v1.schema.json",
+  "title": "CUBE A2A request envelope (cube.a2a.v1)",
+  "description": "Envelope POSTed to an agent's endpoint (Receiving Manager: /api/agent/receive). message_id is sender-unique and the idempotency key per sender agent.",
+  "type": "object",
+  "required": ["a2a_version", "message_id", "sender", "operation"],
+  "additionalProperties": true,
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9._:\\-]{1,128}$"},
+    "inspectionRef": {
+      "type": "object",
+      "required": ["inspection_id"],
+      "properties": {"inspection_id": {"type": "string", "minLength": 1, "maxLength": 64}}
+    }
+  },
+  "properties": {
+    "a2a_version": {"const": "cube.a2a.v1"},
+    "message_id": {"$ref": "#/$defs/id"},
+    "correlation_id": {"$ref": "#/$defs/id"},
+    "timestamp": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"},
+    "sender": {
+      "type": "object",
+      "required": ["agent_id"],
+      "properties": {"agent_id": {"$ref": "#/$defs/id"}, "version": {"type": "string"}}
+    },
+    "recipient": {
+      "type": "object",
+      "properties": {"agent_id": {"$ref": "#/$defs/id"}}
+    },
+    "operation": {
+      "type": "string",
+      "minLength": 1,
+      "examples": ["receiving.inspect", "receiving.get_record", "receiving.verify_record", "agent.ping", "receiving.record_available"]
+    },
+    "payload": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"operation": {"const": "receiving.inspect"}}, "required": ["operation"]},
+      "then": {
+        "required": ["payload"],
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["po", "images"],
+            "properties": {
+              "po": {
+                "type": "object",
+                "required": ["po_id", "sku", "product_name", "expected_quantity", "variant", "units_per_carton", "expected_cartons"],
+                "properties": {
+                  "po_id": {"type": "string", "minLength": 1, "maxLength": 200},
+                  "sku": {"type": "string", "minLength": 1, "maxLength": 200},
+                  "product_name": {"type": "string", "minLength": 1, "maxLength": 200},
+                  "expected_quantity": {"type": "integer", "minimum": 0},
+                  "variant": {"type": "string", "minLength": 1},
+                  "units_per_carton": {"type": "integer", "minimum": 1},
+                  "expected_cartons": {"type": "integer", "minimum": 0},
+                  "expected_components": {"type": "array", "items": {"type": "string"}, "maxItems": 50},
+                  "unit_id": {"type": ["string", "null"]},
+                  "asin": {"type": ["string", "null"]},
+                  "po_line": {"type": ["string", "null"]}
+                }
+              },
+              "shipment": {
+                "type": ["object", "null"],
+                "properties": {
+                  "shipment_id": {"type": ["string", "null"]},
+                  "supplier": {"type": ["string", "null"]},
+                  "expected_delivery_date": {"type": ["string", "null"], "pattern": "^\\d{4}-\\d{2}-\\d{2}$"},
+                  "warehouse": {"type": ["string", "null"]},
+                  "asn": {"type": ["string", "null"]}
+                }
+              },
+              "cartons": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "object",
+                  "required": ["carton_id"],
+                  "properties": {
+                    "carton_id": {"type": "string", "minLength": 1},
+                    "expected_units": {"type": "integer", "minimum": 0},
+                    "seal_condition": {"enum": ["intact", "broken", "resealed", "unknown"]},
+                    "visible_condition": {"enum": ["good", "crushed", "torn", "punctured", "wet", "open", "label_damaged", "unknown"]}
+                  }
+                }
+              },
+              "images": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["filename", "content_base64"],
+                  "properties": {
+                    "view": {"enum": ["pallet", "carton", "unit", "label", "other"]},
+                    "filename": {"type": "string", "minLength": 1},
+                    "content_base64": {"type": "string", "minLength": 1}
+                  }
+                }
+              },
+              "manual_observations": {"type": ["object", "null"]},
+              "scenario": {"type": ["string", "null"], "description": "DEMO_MODE only"}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"operation": {"enum": ["receiving.get_record", "receiving.verify_record"]}}, "required": ["operation"]},
+      "then": {"required": ["payload"], "properties": {"payload": {"$ref": "#/$defs/inspectionRef"}}}
+    },
+    {
+      "if": {"properties": {"operation": {"const": "receiving.record_available"}}, "required": ["operation"]},
+      "then": {
+        "required": ["payload"],
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["inspection_id", "verdict", "decision", "prep_hold", "record"],
+            "properties": {
+              "inspection_id": {"type": "string"},
+              "verdict": {"enum": ["PASS", "FAIL", "UNCERTAIN"]},
+              "decision": {"enum": ["ACCEPT", "REJECT", "PENDING_REVIEW"]},
+              "prep_hold": {"type": "boolean"},
+              "hold_reasons": {"type": "array", "items": {"type": "string"}},
+              "record": {"type": "object"}
+            }
+          }
+        }
+      }
+    }
+  ]
+}
