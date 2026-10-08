@@ -56,20 +56,18 @@ export default function PoEditor({ form, setForm, open, onToggle, disabled }) {
   return (
     <Card
       title="Purchase order line"
-      subtitle="Authoritative expected values (Rule 5) — the agent never takes them from the camera"
-      icon="file"
-      className="step-card"
+      sub="Authoritative expected values (Rule 5) — the agent never takes them from the camera"
       actions={(
-        <button type="button" className="btn btn--secondary btn--sm" onClick={onToggle} aria-expanded={open} aria-controls="po-spec">
-          {open ? 'Hide Specification' : 'Retrieve Specification'}
+        <button type="button" className="btn-theme" onClick={onToggle} aria-expanded={open} aria-controls="po-spec">
+          <Icon name="file" size={15} /> {open ? 'Hide specification' : 'Edit specification'}
         </button>
       )}
     >
       <div className="field">
-        <label htmlFor="po-preset" className="field__label">Active inbound PO</label>
+        <label htmlFor="po-preset" className="field-label">Active inbound PO</label>
         <select
           id="po-preset"
-          className="input select"
+          className="filter-select full"
           value={matchesPreset ? String(presetIndex) : 'custom'}
           disabled={disabled}
           onChange={(event) => {
@@ -95,30 +93,28 @@ export default function PoEditor({ form, setForm, open, onToggle, disabled }) {
       </dl>
 
       {open && (
-        <div id="po-spec" className="spec-panel">
-          <div className="form-grid">
-            {FIELDS.map((field) => (
-              <div key={field.name} className="field">
-                <label htmlFor={`po-${field.name}`} className="field__label">{field.label}</label>
-                <input
-                  id={`po-${field.name}`}
-                  className="input"
-                  type={field.type || 'text'}
-                  min={field.type === 'number' ? 0 : undefined}
-                  value={form[field.name] ?? ''}
-                  disabled={disabled}
-                  onChange={(event) => setForm((current) => ({ ...current, [field.name]: event.target.value }))}
-                />
-              </div>
-            ))}
-          </div>
+        <div id="po-spec" className="form-grid">
+          {FIELDS.map((field) => (
+            <div key={field.name} className="field">
+              <label htmlFor={`po-${field.name}`} className="field-label">{field.label}</label>
+              <input
+                id={`po-${field.name}`}
+                className="filter-input full"
+                type={field.type || 'text'}
+                min={field.type === 'number' ? 0 : undefined}
+                value={form[field.name] ?? ''}
+                disabled={disabled}
+                onChange={(event) => setForm((current) => ({ ...current, [field.name]: event.target.value }))}
+              />
+            </div>
+          ))}
         </div>
       )}
 
       {warnings.length > 0 && (
-        <div className="alert alert--warning" role="status">
-          <Icon name="alert" />
-          <div className="alert__text">{warnings.map((warning) => <div key={warning}>{warning}</div>)}</div>
+        <div className="alert alert-warning" role="status">
+          <Icon name="alert" size={16} />
+          <div className="alert-text">{warnings.map((warning) => <div key={warning}>{warning}</div>)}</div>
         </div>
       )}
     </Card>

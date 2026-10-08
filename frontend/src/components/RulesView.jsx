@@ -1,3 +1,4 @@
+import { Fragment } from 'react';
 import { Card, Icon } from './Shared';
 
 const RULES = [
@@ -27,30 +28,59 @@ const RULES = [
     body: 'An operator can override the agent with a mandatory reason. Overriding to PASS requires an approver-role API key; operators may only escalate to EXCEPTION or UNCERTAIN. Overrides are append-only.',
   },
   {
-    title: 'Tamper-evident evidence record',
+    title: 'Tamper-evident record',
     icon: 'shield',
     body: 'Each analysis and override writes a new record version that embeds image SHA-256 digests, is hash-chained to the previous version and HMAC-sealed. "Verify integrity" recomputes the hashes, seals and chain.',
   },
 ];
 
+export const FLOW = [
+  { label: 'PO line', desc: 'Expected values', icon: 'file' },
+  { label: 'Photos', desc: 'Per capture view', icon: 'image' },
+  { label: 'Perception', desc: 'Live model or demo', icon: 'eye' },
+  { label: 'Decision engine', desc: 'Deterministic rules', icon: 'gauge' },
+  { label: 'Sealed record', desc: 'Hash-chained', icon: 'shield' },
+  { label: 'Override', desc: 'Optional, with reason', icon: 'key' },
+];
+
+export function ChainDiagram({ steps, activeIndex = -1 }) {
+  return (
+    <div className="chain-diagram">
+      {steps.map((step, index) => (
+        <Fragment key={step.label}>
+          {index > 0 && <span className="chain-arrow" aria-hidden="true">→</span>}
+          <div className={`chain-step ${index === activeIndex ? 'active-step' : ''} ${index < activeIndex ? 'done-step' : ''}`}>
+            <div className="chain-icon"><Icon name={index < activeIndex ? 'check' : step.icon} size={22} /></div>
+            <div className="chain-label">{step.label}</div>
+            <div className="chain-desc">{step.desc}</div>
+          </div>
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
 export default function RulesView() {
   return (
     <div className="stack">
-      <div className="rules-grid">
-        {RULES.map((rule) => (
-          <article key={rule.title} className="card rule-card">
-            <span className="rule-card__icon"><Icon name={rule.icon} size={18} /></span>
-            <h3 className="rule-card__title">{rule.title}</h3>
-            <p className="rule-card__body">{rule.body}</p>
-          </article>
-        ))}
-      </div>
-      <Card title="Receiving flow" icon="truck">
-        <ol className="flow">
-          {['PO line', 'Create inspection', 'Upload photos per view', 'Perception (live model or demo scenario)', 'Deterministic decision engine', 'Sealed evidence record', 'Optional override', 'Integrity verification'].map((step, index) => (
-            <li key={step} className="flow__step"><span className="flow__num">{index + 1}</span>{step}</li>
-          ))}
-        </ol>
+      <Card flush title="Receiving rules" sub="How the agent decides, holds and records">
+        <div className="policy-note">
+          The decision engine is deterministic: the model only reports what it sees; these rules turn that into a verdict.
+        </div>
+        <table className="policy-table">
+          <thead><tr><th>Rule</th><th>What the agent does</th></tr></thead>
+          <tbody>
+            {RULES.map((rule) => (
+              <tr key={rule.title}>
+                <td><Icon name={rule.icon} size={16} />{rule.title}</td>
+                <td>{rule.body}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+      <Card flush title="Receiving flow" sub="From purchase order line to verified evidence">
+        <ChainDiagram steps={FLOW} />
       </Card>
     </div>
   );

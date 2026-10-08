@@ -114,10 +114,12 @@ def test_dotenv_is_loaded_without_overriding_real_env(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("raw", ["{not json", json.dumps({"k": {"operator_id": "x"}}), "[1]"])
-def test_malformed_api_keys_give_clear_503(monkeypatch, raw):
+def test_malformed_api_keys_give_generic_503_and_log_the_reason(monkeypatch, raw, caplog):
     _set_env(monkeypatch, RECEIVING_API_KEYS=raw)
-    r = client.get("/api/inspections", headers=A)
-    assert r.status_code == 503 and r.json()["detail"].startswith("RECEIVING_API_KEYS is malformed:")
+    with caplog.at_level("ERROR", logger=api.log.name):
+        r = client.get("/api/inspections", headers=A)
+    assert r.status_code == 503 and r.json()["detail"] == api.KEYS_MISCONFIGURED  # no parse error or position
+    assert "RECEIVING_API_KEYS is malformed:" in caplog.text
 
 
 def test_invalid_role_is_treated_as_operator(monkeypatch):
@@ -341,7 +343,7 @@ def test_public_example_keys_only_work_in_demo_mode(monkeypatch):
     keys = json.dumps({"change-me-operator-key": {"organization_id": "org", "operator_id": "op"}})
     _set_env(monkeypatch, RECEIVING_API_KEYS=keys, DEMO_MODE="false")
     r = client.get("/api/inspections", headers={"X-API-Key": "change-me-operator-key"})
-    assert r.status_code == 503 and "change-me" in r.json()["detail"]
+    assert r.status_code == 503 and r.json()["detail"] == api.KEYS_MISCONFIGURED
     _set_env(monkeypatch, RECEIVING_API_KEYS=keys, DEMO_MODE="true")
     assert client.get("/api/inspections", headers={"X-API-Key": "change-me-operator-key"}).status_code == 200
 
@@ -349,3 +351,56 @@ def test_public_example_keys_only_work_in_demo_mode(monkeypatch):
 def test_failure_reason_does_not_leak_urls():
     reason = api._public_failure_reason(RuntimeError("Connection error to https://internal.example/v1/responses?key=x"))
     assert reason == "RuntimeError: Connection error to <url>"
+
+
+# Testing follow-ups
+
+
+def test_image_count_is_checked_before_any_file_is_read(monkeypatch):
+    _set_env(monkeypatch, UPLOAD_MAX_IMAGES="2")
+    iid = _create_inspection()["inspection_id"]
+    _upload(iid)
+    real_validate, reads = api._validate_image_upload, []
+    monkeypatch.setattr(api, "_validate_image_upload", lambda *a: reads.append(1) or real_validate(*a))
+    files = [("files", (f"{i}.png", _png_bytes(), "image/png")) for i in range(2)]
+    r = client.post(f"/api/inspections/{iid}/images", files=files, headers=A)
+    assert r.status_code == 400 and "Maximum image count" in r.json()["detail"]
+    assert reads == []
+
+
+def test_upload_larger_than_any_valid_request_is_413_before_parsing(monkeypatch):
+    _set_env(monkeypatch, UPLOAD_MAX_IMAGES="1", MAX_IMAGE_SIZE_MB="1")  # limit: 1 MB image + 1 MB overhead
+    iid = _create_inspection()["inspection_id"]
+    big = _png_bytes() + b"\x00" * (2 * 1024 * 1024 + 1)
+    r = client.post(f"/api/inspections/{iid}/images", files=[("files", ("big.png", big, "image/png"))], headers=A)
+    assert r.status_code == 413 and r.json()["detail"] == "Upload request is too large."
+    _upload(iid)  # a normal upload still passes the middleware
+
+
+@pytest.mark.parametrize("field,value", [
+    ("expected_quantity", 1_000_001), ("units_per_carton", 1_000_001), ("expected_cartons", 1_000_001),
+    ("sku", "S" * 201), ("product_name", "P" * 201), ("po_line", "1" * 201),
+    ("expected_components", ["c"] * 51), ("expected_components", ["c" * 201]),
+])
+def test_po_fields_have_upper_bounds(field, value):
+    r = client.post("/api/inspections", json={"po": {**PO, field: value}}, headers=A)
+    assert r.status_code == 422
+
+
+def test_po_at_the_bounds_is_accepted():
+    _create_inspection({**PO, "expected_quantity": 1_000_000, "sku": "S" * 200, "expected_components": ["c" * 200] * 50})
+
+
+def test_upload_filename_is_sanitized_before_storing_and_serving(monkeypatch):
+    iid = _create_inspection()["inspection_id"]
+    names = ["../../evil.png", "..\\..\\win\\evil.png", "a;b'c.png", "/" + "x" * 300 + ".png"]
+    files = [("files", (name, _png_bytes(), "image/png")) for name in names]
+    images = client.post(f"/api/inspections/{iid}/images", files=files, headers=A).json()["images"]
+    stored = [img["filename"] for img in images]
+    assert stored[:3] == ["evil.png", "evil.png", "abc.png"]
+    assert len(stored[3]) == api.MAX_FILENAME_LENGTH and stored[3].endswith(".png")
+    r = client.get(f"/api/inspections/{iid}/images/{images[0]['image_id']}", headers=A)
+    assert r.status_code == 200 and r.headers["content-disposition"] == 'attachment; filename="evil.png"'
+    # httpx percent-encodes quotes and CR/LF in multipart names, so exercise those directly.
+    assert api._safe_filename('a"b\r\n\x00c.png') == "abc.png"
+    assert api._safe_filename("..", ".png") == "image.png" and api._safe_filename('\\"/', ".jpg") == "image.jpg"

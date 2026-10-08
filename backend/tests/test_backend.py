@@ -121,6 +121,7 @@ def test_health_endpoint_is_public():
     response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+    assert isinstance(response.json()["demo_mode"], bool)  # the Scenario Benchmark reads this
 
 
 def test_cors_headers_are_enabled_for_allowed_origin():

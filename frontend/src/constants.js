@@ -109,6 +109,21 @@ export const isAnalyzed = (inspection) =>
 export const effectiveDecision = (inspection) =>
   (isAnalyzed(inspection) ? inspection.override_decision || inspection.final_decision : 'NOT_ANALYZED');
 
+// The verdict the agent reached before the operator overrode it. After an override the backend
+// rewrites final_decision to the override verdict, so read it from the override chain instead:
+// overrides are appended oldest-first and carried across re-analyses, so walk back from the latest
+// one while each override follows directly on the previous (no re-analysis in between); that run's
+// first override holds the agent verdict in from_verdict. Returns null when it cannot be determined.
+export function agentDecision(inspection) {
+  const overrides = inspection?.overrides?.length ? inspection.overrides : inspection?.record?.overrides || [];
+  if (!overrides.length) return null;
+  let index = overrides.length - 1;
+  while (index > 0 && overrides[index].prev_content_hash && overrides[index].prev_content_hash === overrides[index - 1].new_content_hash) {
+    index -= 1;
+  }
+  return overrides[index].from_verdict || null;
+}
+
 export const formatTime = (value) => {
   if (!value) return '—';
   const date = new Date(value);

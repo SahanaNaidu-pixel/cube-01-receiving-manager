@@ -60,6 +60,7 @@ class InspectionOverrideRequest(BaseModel):
 
 # The keys shipped in .env.example are public, so they only work for a local demo.
 PLACEHOLDER_KEY_PREFIX = "change-me"
+KEYS_MISCONFIGURED = "Server API keys are misconfigured."
 
 
 def _public_failure_reason(exc: Exception) -> str:
@@ -95,14 +96,16 @@ def require_principal(x_api_key: str | None = Header(default=None)) -> dict:
     raw = get_settings().receiving_api_keys
     if not raw:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Authentication is not configured (RECEIVING_API_KEYS).")
+    # The reason goes to the server log only; unauthenticated callers just learn the keys are misconfigured.
     try:
         keys = _parse_api_keys(raw)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"RECEIVING_API_KEYS is malformed: {exc}") from None
+        log.error("RECEIVING_API_KEYS is malformed: %s", exc)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=KEYS_MISCONFIGURED) from None
     if not get_settings().demo_mode and any(key.startswith(PLACEHOLDER_KEY_PREFIX) for key in keys):
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                            detail="RECEIVING_API_KEYS still contains the public 'change-me' example keys; "
-                                   "they are only accepted with DEMO_MODE=true. Generate real keys.")
+        log.error("RECEIVING_API_KEYS still contains the public 'change-me' example keys; "
+                  "they are only accepted with DEMO_MODE=true. Generate real keys.")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=KEYS_MISCONFIGURED)
     if not x_api_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing X-API-Key header.")
     for key, principal in keys.items():
@@ -154,20 +157,35 @@ def _detect_image_mime(content: bytes) -> str:
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is not a valid supported image.")
 
 
+MAX_FILENAME_LENGTH = 100
+
+
+def _safe_filename(raw: str | None, suffix: str = "") -> str:
+    """Display-only basename: no path parts (/ or backslash), control chars or quotes, bounded length."""
+    name = re.split(r"[\\/]", raw or "")[-1]
+    name = re.sub(r"[\x00-\x1f\x7f\"';]", "", name).strip().strip(".")
+    if len(name) > MAX_FILENAME_LENGTH:
+        stem, ext = Path(name).stem, Path(name).suffix[:10]
+        name = stem[: MAX_FILENAME_LENGTH - len(ext)] + ext
+    return name or f"image{suffix}"
+
+
 def _validate_image_upload(file: UploadFile, inspection_id: str):
     settings = get_settings()
     allowed_types = {item.strip().lower() for item in settings.allowed_image_types.split(",") if item.strip()}
     allowed_exts = {item.strip().lower() for item in settings.allowed_extensions.split(",") if item.strip()}
 
-    original_name = (file.filename or "upload").strip()
-    if not original_name or original_name in {".", ".."}:
+    raw_name = (file.filename or "upload").strip()
+    if not raw_name or raw_name in {".", ".."}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file name is invalid.")
 
-    suffix = Path(original_name).suffix.lower()
+    suffix = Path(raw_name).suffix.lower()
     if not suffix:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"File has no extension; allowed: {', '.join(sorted(allowed_exts))}.")
     if suffix not in allowed_exts:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported file extension: {suffix}.")
+
+    original_name = _safe_filename(raw_name, suffix)  # the raw client name is never stored or echoed
 
     max_bytes = settings.max_image_size_mb * 1024 * 1024
     content = file.file.read(max_bytes + 1)
@@ -239,6 +257,16 @@ def get_inspection(inspection_id: str, principal: dict = Depends(require_princip
     return _view(_load(principal, inspection_id))
 
 
+def _check_image_count(inspection: Inspection, incoming: int, settings) -> None:
+    if len(inspection.images) + incoming > settings.upload_max_images:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Maximum image count exceeded for this inspection ({settings.upload_max_images}).")
+
+
+def upload_body_limit(settings) -> int:
+    """Largest upload request that could succeed: every allowed image at full size plus multipart overhead."""
+    return settings.upload_max_images * settings.max_image_size_mb * 1024 * 1024 + 1024 * 1024
+
+
 @router.post("/{inspection_id}/images")
 def upload_images(
     inspection_id: str,
@@ -246,16 +274,17 @@ def upload_images(
     image_type: str = Form("other"),
     principal: dict = Depends(require_principal),
 ):
-    _load(principal, inspection_id)
+    inspection = _load(principal, inspection_id)
     if not files:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No image files were provided")
+    settings = get_settings()
+    # Cheap pre-check before any file is read into memory; re-checked under the lock below.
+    _check_image_count(inspection, len(files), settings)
     validated_files = [_validate_image_upload(file, inspection_id) for file in files]  # all-or-nothing: validate first
     view = _contract_view(image_type)
-    settings = get_settings()
     with _inspection_lock(principal["organization_id"], inspection_id):
         inspection = _load(principal, inspection_id)
-        if len(inspection.images) + len(validated_files) > settings.upload_max_images:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Maximum image count exceeded for this inspection ({settings.upload_max_images}).")
+        _check_image_count(inspection, len(validated_files), settings)
         saved_images: list[ReceivingImage] = []
         try:
             for validated in validated_files:
@@ -303,7 +332,9 @@ def get_inspection_image(inspection_id: str, image_id: str, principal: dict = De
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image file not found")
 
-    return FileResponse(file_path, media_type=image_record.mime_type, filename=image_record.filename)
+    # Re-sanitize: records stored before filenames were cleaned may still hold a raw client name.
+    filename = _safe_filename(image_record.filename, file_path.suffix)
+    return FileResponse(file_path, media_type=image_record.mime_type, filename=filename)
 
 
 PERCEPTION_CHECKS = ("sku_check", "carton_check", "units_per_carton_check", "quantity_check",

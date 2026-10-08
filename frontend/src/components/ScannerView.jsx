@@ -10,16 +10,16 @@ import {
   CAPTURE_VIEWS,
   PERCEPTION_FAILURE_SCENARIO,
   SCENARIOS,
+  agentDecision,
   decisionMeta,
   effectiveDecision,
-  formatTime,
   isAnalyzed,
   poSignature,
   shortHash,
   viewLabel,
 } from '../constants';
 import PoEditor, { toPoPayload } from './PoEditor';
-import { Badge, Card, ChecksTable, EvidenceImage, Icon, VerifyIntegrity } from './Shared';
+import { Card, ChecksTable, DecisionPill, Gallery, HeroStats, Icon, OverrideTimeline, VerifyIntegrity } from './Shared';
 
 const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const PHASE_TEXT = {
@@ -34,14 +34,13 @@ const latestRecord = (...records) =>
 
 export default function ScannerView({
   poForm, setPoForm, inspection, setInspection, analysis, setAnalysis,
-  demoMode, setDemoMode, onChanged, onError, onOpenBenchmark,
+  demoMode, setDemoMode, onChanged, onError, onBusyChange, onOpenBenchmark,
 }) {
   const [queue, setQueue] = useState([]);
   const [phase, setPhase] = useState('');
   const [specOpen, setSpecOpen] = useState(false);
   const [activeScenario, setActiveScenario] = useState('correct_shipment');
   const [failOpen, setFailOpen] = useState(false);
-  const [selectedView, setSelectedView] = useState(CAPTURE_VIEWS[0].key);
   const [dragView, setDragView] = useState('');
   const [overrideDecision, setOverrideDecision] = useState('EXCEPTION');
   const [overrideReason, setOverrideReason] = useState('');
@@ -55,6 +54,7 @@ export default function ScannerView({
   useEffect(() => () => queueRef.current.forEach((item) => URL.revokeObjectURL(item.url)), []);
 
   const busy = Boolean(phase);
+  useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
   const analyzed = isAnalyzed(inspection);
   const poDirty = Boolean(inspection) && poSignature(toPoPayload(poForm)) !== poSignature(inspection.po);
   const uploadedCount = inspection?.images?.length ?? 0;
@@ -80,7 +80,6 @@ export default function ScannerView({
     const accepted = files.filter((file) => ACCEPTED_TYPES.includes(file.type));
     if (accepted.length < files.length) onError('Only JPEG, PNG or WebP photos can be uploaded; other files were skipped.');
     if (!accepted.length) return;
-    setSelectedView(viewKey);
     setQueue((current) => [
       ...current,
       ...accepted.map((file) => ({ id: `${Date.now()}-${Math.random()}`, file, view: viewKey, url: URL.createObjectURL(file) })),
@@ -211,31 +210,30 @@ export default function ScannerView({
   };
 
   const decision = effectiveDecision(inspection);
-  const decisionInfo = decisionMeta(decision);
   const record = latestRecord(inspection?.record, analysis?.record);
   const failureReason = analysis?.failure_reason || record?.outcome?.failure_reason;
   const modelVersion = record?.checks?.find((check) => check.model_version)?.model_version;
   const overrides = inspection?.overrides?.length ? inspection.overrides : record?.overrides || [];
+  const agentVerdict = agentDecision({ overrides });
   const agentSteps = [
     { label: 'Create inspection', complete: Boolean(inspection) && !poDirty },
     { label: `Capture evidence${queue.length ? ` (${queue.length} queued)` : ''}`, complete: uploadedCount > 0 && !poDirty },
     { label: 'Agent decision', complete: analyzed && !poDirty },
   ];
   const modeLabel = demoMode === null ? 'Mode unknown' : demoMode ? 'Demo' : 'Live';
-  const modeTone = demoMode === null ? 'neutral' : demoMode ? 'hold' : 'success';
   // The backend refuses to analyze an inspection with zero evidence, even in demo mode.
   const hasEvidence = queue.length > 0 || (uploadedCount > 0 && !poDirty);
   const runLabel = phase ? PHASE_TEXT[phase] : 'Run receiving inspection';
 
   return (
-    <div className="workspace">
-      <div className="workspace__top">
-        <div className="workspace__main">
+    <>
+      <div className="workspace">
+        <div className="workspace-main">
           <PoEditor form={poForm} setForm={setPoForm} open={specOpen} onToggle={() => setSpecOpen((value) => !value)} disabled={busy} />
           {poDirty && (
-            <div className="alert alert--warning" role="status">
-              <Icon name="alert" />
-              <span className="alert__text">
+            <div className="alert alert-warning" role="status">
+              <Icon name="alert" size={16} />
+              <span className="alert-text">
                 PO changed since inspection {inspection.inspection_id} was created — the next run starts a fresh inspection
                 {uploadedCount ? ' (photos already uploaded stay with the old one)' : ''}.
               </span>
@@ -244,21 +242,19 @@ export default function ScannerView({
 
           <Card
             title="Delivery photos"
-            subtitle="Capture each view at the point of receipt — drop files on a zone or click to add"
-            icon="upload"
-            className="step-card"
-            actions={<Badge tone="neutral" dot={false}>{uploadedCount} uploaded · {queue.length} queued</Badge>}
+            sub="Capture each view at the point of receipt — drop files on a zone or click to add"
+            actions={<span className="page-badge">{uploadedCount} uploaded · {queue.length} queued</span>}
           >
-            <div className="upload-grid">
+            <div className="upload-grid compact">
               {CAPTURE_VIEWS.map((view) => {
                 const inputId = `capture-${view.key}`;
                 const queuedHere = queue.filter((item) => item.view === view.key).length;
                 const uploadedHere = (inspection?.images || []).filter((image) => image.image_type === view.key).length;
                 const classes = [
                   'upload-zone',
-                  selectedView === view.key ? 'upload-zone--selected' : '',
-                  dragView === view.key ? 'upload-zone--drag' : '',
-                  uploadedHere + queuedHere > 0 ? 'upload-zone--filled' : '',
+                  uploadedHere + queuedHere > 0 ? 'has-file' : '',
+                  dragView === view.key ? 'is-drag' : '',
+                  busy ? 'is-disabled' : '',
                 ].join(' ');
                 return (
                   <div
@@ -268,15 +264,14 @@ export default function ScannerView({
                     onDragLeave={() => setDragView((current) => (current === view.key ? '' : current))}
                     onDrop={(event) => handleDrop(view.key, event)}
                   >
-                    <span className="upload-zone__icon"><Icon name={view.icon} size={20} /></span>
-                    <strong className="upload-zone__title">{view.label}</strong>
-                    <small className="upload-zone__hint">{view.hint}</small>
-                    <label htmlFor={inputId} className={`btn btn--secondary btn--sm file-label ${busy ? 'is-disabled' : ''}`}>
-                      <Icon name="plus" size={14} /> Add photos
+                    <label htmlFor={inputId}>
+                      <span className="upload-icon"><Icon name={view.icon} size={26} /></span>
+                      <span className="upload-label">{view.label}</span>
+                      <span className="upload-hint">{view.hint}</span>
+                      <span className="upload-count">{uploadedHere} uploaded · {queuedHere} queued</span>
                     </label>
                     <input
                       id={inputId}
-                      className="file-input"
                       type="file"
                       accept="image/jpeg,image/png,image/webp"
                       multiple
@@ -284,57 +279,53 @@ export default function ScannerView({
                       disabled={busy}
                       onChange={(event) => handleFiles(view.key, event)}
                     />
-                    <small className="upload-zone__count">{uploadedHere} uploaded · {queuedHere} queued</small>
                   </div>
                 );
               })}
             </div>
 
             {queue.length > 0 && (
-              <div className="queue">
-                <div className="queue__grid">
+              <>
+                <div className="gallery">
                   {queue.map((item) => (
-                    <figure key={item.id} className="thumb queue-card">
+                    <figure key={item.id} className="thumb">
                       <img src={item.url} alt={`Queued ${viewLabel(item.view)} photo ${item.file.name}`} />
                       <figcaption>
-                        <span className="thumb__view">{viewLabel(item.view)}</span>
-                        <span className="thumb__name">{item.file.name}</span>
+                        <span className="thumb-view">{viewLabel(item.view)}</span>
+                        <span className="thumb-name">{item.file.name}</span>
                       </figcaption>
-                      <button type="button" className="btn btn--ghost btn--sm thumb__remove" disabled={busy} onClick={() => removeQueued([item.id])}>
+                      <button type="button" className="detail-btn" disabled={busy} onClick={() => removeQueued([item.id])}>
                         Remove
                       </button>
                     </figure>
                   ))}
                 </div>
-                <button type="button" className="btn btn--secondary upload-button" disabled={busy} onClick={handleUploadOnly}>
-                  <Icon name="upload" size={15} />
-                  {phase === 'uploading' ? 'Uploading…' : `Upload ${queue.length} queued photo(s) now`}
-                </button>
-              </div>
+                <div>
+                  <button type="button" className="btn-theme" disabled={busy} onClick={handleUploadOnly}>
+                    <Icon name="upload" size={15} />
+                    {phase === 'uploading' ? 'Uploading…' : `Upload ${queue.length} queued photo(s) now`}
+                  </button>
+                </div>
+              </>
             )}
           </Card>
         </div>
 
-        <aside className="workspace__side">
-          <Card
-            title="Run inspection"
-            icon="play"
-            className="run-card"
-            actions={<Badge tone={modeTone}>{modeLabel}</Badge>}
-          >
+        <aside className="workspace-side">
+          <Card title="Run inspection" actions={<span className="page-badge">{modeLabel}</span>}>
             <ol className="steps">
               {agentSteps.map((step, index) => (
-                <li key={step.label} className={`steps__item ${step.complete ? 'steps__item--done' : ''}`}>
-                  <span className="steps__marker">{step.complete ? <Icon name="check" size={13} /> : index + 1}</span>
+                <li key={step.label} className={step.complete ? 'done' : ''}>
+                  <span className="step-num">{step.complete ? <Icon name="check" size={12} /> : index + 1}</span>
                   <span>{step.label}</span>
                 </li>
               ))}
             </ol>
-            <button type="button" className="btn btn--primary btn--lg btn--block run-analysis-button" onClick={handleRun} disabled={busy || !hasEvidence} aria-busy={busy} aria-describedby="run-hint">
+            <button type="button" className="btn-primary btn-block" onClick={handleRun} disabled={busy || !hasEvidence} aria-busy={busy} aria-describedby="run-hint">
               {busy ? <span className="spinner" aria-hidden="true" /> : <Icon name="play" size={16} />}
               {runLabel}
             </button>
-            <button type="button" className="btn btn--secondary btn--block" onClick={() => resetInspection()} disabled={busy || (!inspection && !queue.length)}>
+            <button type="button" className="btn-theme btn-block" onClick={() => resetInspection()} disabled={busy || (!inspection && !queue.length)}>
               <Icon name="plus" size={15} /> New inspection
             </button>
             <p id="run-hint" className="hint">
@@ -345,7 +336,7 @@ export default function ScannerView({
             <div className="status-line" role="status" aria-live="polite">{status}</div>
           </Card>
 
-          <Card title="Demo scenarios" icon="flask" subtitle={demoMode === false
+          <Card title="Demo scenarios" sub={demoMode === false
             ? 'Live mode: the backend ignores the scenario; the decision comes from your uploaded photos.'
             : 'In demo mode (DEMO_MODE=true) the selected scenario drives the simulated perception result.'}
           >
@@ -355,186 +346,170 @@ export default function ScannerView({
                   key={scenario.key}
                   type="button"
                   aria-pressed={activeScenario === scenario.key}
-                  className={`chip scenario-chip chip--${decisionMeta(scenario.expected).tone} ${activeScenario === scenario.key ? 'chip--active' : ''}`}
+                  className={`chip ${activeScenario === scenario.key ? 'active' : ''}`}
                   disabled={busy}
                   onClick={() => { setActiveScenario(scenario.key); appendLog(`Scenario set to ${scenario.label}.`); }}
                 >
-                  <span className="chip__label">{scenario.label}</span>
-                  <span className="chip__outcome">{decisionMeta(scenario.expected).label}</span>
+                  {scenario.label}
+                  <span className={`chip-outcome o-${scenario.expected}`}>{decisionMeta(scenario.expected).label}</span>
                 </button>
               ))}
             </div>
             <div className="switch-row">
-              <label htmlFor="fail-open-toggle" className="switch-row__label">
+              <label htmlFor="fail-open-toggle">
                 <strong>Fail-open drill (Rule 3)</strong>
                 <span>Force a perception failure in demo mode — expect Pending · Hold</span>
               </label>
               <button
                 id="fail-open-toggle"
                 type="button"
-                className={`switch ${failOpen ? 'switch--on' : ''}`}
+                className={`switch ${failOpen ? 'on' : ''}`}
                 aria-pressed={failOpen}
                 disabled={busy}
                 onClick={() => setFailOpen((value) => !value)}
               >
-                <span className="switch__thumb" />
                 <span className="sr-only">Force perception failure</span>
               </button>
             </div>
           </Card>
 
-          <Card title="Activity" icon="activity">
-            <ul className="feed" aria-live="polite">
+          <Card title="Agent activity">
+            <div className="timeline-list flush compact" aria-live="polite">
               {agentLog.map((entry) => (
-                <li key={entry.id} className={`feed__item ${entry.complete ? 'feed__item--done' : ''}`}>
-                  <span className="feed__dot" aria-hidden="true" />
-                  <span>{entry.text}</span>
-                </li>
+                <div key={entry.id} className={`timeline-item ${entry.complete ? 'item-good' : ''}`}>
+                  <div className="timeline-content">{entry.text}</div>
+                </div>
               ))}
-            </ul>
+            </div>
           </Card>
         </aside>
       </div>
 
-      <div className="workspace__results">
-        {!inspection && (
-          <section className="card empty-state">
-            <span className="empty-state__icon"><Icon name="truck" size={26} /></span>
-            <h2 className="empty-state__title">No active receiving inspection</h2>
-            <p className="empty-state__text">Choose a PO line, capture the delivery photos, and run the inspection.</p>
-            <button type="button" className="btn btn--secondary" onClick={onOpenBenchmark}>
-              <Icon name="gauge" size={15} /> Run the 8-Scenario Benchmark Instead
+      {!inspection && (
+        <section className="card empty-card results">
+          <div className="empty-state">
+            <Icon name="truck" size={30} />
+            <h3>No active receiving inspection</h3>
+            <p>Choose a PO line, capture the delivery photos, and run the inspection.</p>
+            <button type="button" className="btn-theme" onClick={onOpenBenchmark}>
+              <Icon name="gauge" size={15} /> Run the 8-scenario benchmark instead
             </button>
-          </section>
-        )}
+          </div>
+        </section>
+      )}
 
-        {inspection && (
-          <section className="results-area">
-            <div className="result-grid">
-              <Card title="Receiving status" icon="shield" className={`decision-card decision-card--${decisionInfo.tone}`}>
-                <div className="decision">
-                  <span className={`decision__badge decision__badge--${decisionInfo.tone}`}>{decisionInfo.label}</span>
-                  <span className="decision__code mono">{decision}</span>
-                </div>
-                {inspection.override_decision && (
-                  <p className="decision__note">
-                    Agent decision {decisionMeta(inspection.final_decision).label} · overridden to {decisionMeta(inspection.override_decision).label} ({inspection.override_decision})
-                  </p>
-                )}
-                {failureReason && (
-                  <div className="alert alert--hold">
-                    <Icon name="clock" />
-                    <span className="alert__text">Perception failure: {failureReason}. Held for human review (fail-open).</span>
-                  </div>
-                )}
-                {record?.outcome?.prep_hold && (
-                  <div className="hold">
-                    <span className="hold__label">Prep hold</span>
-                    <div className="hold__tags">
-                      {(record.outcome.hold_reasons || ['yes']).map((reason) => <span key={reason} className="tag tag--danger mono">{reason}</span>)}
-                    </div>
-                  </div>
-                )}
-                <dl className="meta-list">
-                  <div><dt>Inspection ID</dt><dd className="mono">{inspection.inspection_id}</dd></div>
-                  <div><dt>Purchase order</dt><dd>{inspection.po?.po_id} · {inspection.po?.product_name}</dd></div>
-                  <div><dt>Status</dt><dd className="capitalize">{inspection.status}{analysis?.analysis_status ? ` · analysis ${analysis.analysis_status}` : ''}</dd></div>
-                  <div>
-                    <dt>Perception</dt>
-                    <dd>
-                      {analysis ? (analysis.demo_mode ? 'DEMO (simulated)' : 'LIVE model') : 'unknown for this session'}
-                      {modelVersion ? ` · ${modelVersion}` : ''}
-                    </dd>
-                  </div>
-                  <div><dt>Evidence record</dt><dd className="mono">{record ? `v${record.version} · ${shortHash(record.content_hash)}` : 'not sealed yet'}</dd></div>
-                </dl>
-              </Card>
-
-              <Card title="Agent summary" icon="file">
-                <p className="summary-text">
-                  {inspection.agent_summary || 'The receiving agent is awaiting a completed evidence review.'}
+      {inspection && (
+        <section className="results">
+          <div className="result-grid">
+            <Card title="Receiving status" sub={`Inspection ${inspection.inspection_id}`} actions={<DecisionPill decision={decision} />}>
+              <HeroStats
+                flush
+                items={[
+                  { label: 'Decision', value: decisionMeta(decision).label, className: `d-${decision}` },
+                  { label: 'Photos', value: uploadedCount },
+                  { label: 'Record', value: record ? `v${record.version}` : '—' },
+                ]}
+              />
+              {inspection.override_decision && (
+                <p className="hint">
+                  {agentVerdict ? `Agent decision ${decisionMeta(agentVerdict).label} · overridden` : 'Overridden'} to {decisionMeta(inspection.override_decision).label} ({inspection.override_decision})
                 </p>
-                <VerifyIntegrity inspectionId={inspection.inspection_id} />
-              </Card>
-            </div>
-
-            <Card title="Inspection checks" icon="list" subtitle="Each check compares what the photos show against the PO line">
-              {(inspection.checks || []).length === 0
-                ? <p className="hint">No checks yet — run the inspection.</p>
-                : <ChecksTable checks={inspection.checks} />}
+              )}
+              {failureReason && (
+                <div className="alert alert-hold">
+                  <Icon name="clock" size={16} />
+                  <span className="alert-text">Perception failure: {failureReason}. Held for human review (fail-open).</span>
+                </div>
+              )}
+              {record?.outcome?.prep_hold && (
+                <div className="hold-row">
+                  <span className="hold-label">Prep hold</span>
+                  {(record.outcome.hold_reasons || ['yes']).map((reason) => <span key={reason} className="cat-flag mono">{reason}</span>)}
+                </div>
+              )}
+              <dl className="modal-kv flush">
+                <dt className="modal-key">Purchase order</dt><dd className="modal-val">{inspection.po?.po_id} · {inspection.po?.product_name}</dd>
+                <dt className="modal-key">Status</dt><dd className="modal-val capitalize">{inspection.status}{analysis?.analysis_status ? ` · analysis ${analysis.analysis_status}` : ''}</dd>
+                <dt className="modal-key">Perception</dt>
+                <dd className="modal-val">
+                  {analysis ? (analysis.demo_mode ? 'DEMO (simulated)' : 'LIVE model') : 'unknown for this session'}
+                  {modelVersion ? ` · ${modelVersion}` : ''}
+                </dd>
+                <dt className="modal-key">Evidence record</dt><dd className="modal-val mono">{record ? `v${record.version} · ${shortHash(record.content_hash)}` : 'not sealed yet'}</dd>
+              </dl>
             </Card>
 
-            <Card title="Operator override" icon="key" subtitle="Overrides are append-only and need a reason; Passed requires an approver key">
-              {!analyzed ? (
-                <p className="hint">Overrides are available after the inspection has been analyzed.</p>
-              ) : (
-                <div className="override">
-                  <div className="override__row">
-                    <div className="field">
-                      <label htmlFor="override-decision" className="field__label">Override decision</label>
-                      <select id="override-decision" className="input select" value={overrideDecision} disabled={busy} onChange={(event) => setOverrideDecision(event.target.value)}>
-                        <option value="PASS">Passed — PASS (approver only)</option>
-                        <option value="EXCEPTION">Exception — EXCEPTION</option>
-                        <option value="UNCERTAIN">Uncertain — UNCERTAIN</option>
-                      </select>
-                    </div>
-                    <button type="button" className="btn btn--primary" onClick={handleOverride} disabled={busy}>
-                      {phase === 'overriding' ? 'Applying…' : 'Apply override'}
-                    </button>
-                  </div>
+            <Card title="Agent summary" sub="Plain-language reasoning behind the decision">
+              <div className="claim-reasoning flush">
+                {inspection.agent_summary || 'The receiving agent is awaiting a completed evidence review.'}
+              </div>
+              <VerifyIntegrity inspectionId={inspection.inspection_id} />
+            </Card>
+          </div>
+
+          <Card title="Inspection checks" sub="Each check compares what the photos show against the PO line">
+            {(inspection.checks || []).length === 0
+              ? <p className="hint">No checks yet — run the inspection.</p>
+              : <ChecksTable checks={inspection.checks} />}
+          </Card>
+
+          <Card title="Operator override" sub="Overrides are append-only and need a reason; Passed requires an approver key">
+            {!analyzed ? (
+              <p className="hint">Overrides are available after the inspection has been analyzed.</p>
+            ) : (
+              <>
+                <div className="override-row">
                   <div className="field">
-                    <label htmlFor="override-reason" className="field__label">Reason (required)</label>
-                    <textarea
-                      id="override-reason"
-                      className="input textarea"
-                      value={overrideReason}
-                      onChange={(event) => setOverrideReason(event.target.value)}
-                      rows={3}
-                      required
-                      disabled={busy}
-                      placeholder="Why does the operator disagree with the agent?"
-                    />
+                    <label htmlFor="override-decision" className="field-label">Override decision</label>
+                    <select id="override-decision" className="filter-select full" value={overrideDecision} disabled={busy} onChange={(event) => setOverrideDecision(event.target.value)}>
+                      <option value="PASS">Passed — PASS (approver only)</option>
+                      <option value="EXCEPTION">Exception — EXCEPTION</option>
+                      <option value="UNCERTAIN">Uncertain — UNCERTAIN</option>
+                    </select>
                   </div>
-                  {overrideNote && <div className="verify__result verify__result--bad">{overrideNote}</div>}
+                  <button type="button" className="btn-primary" onClick={handleOverride} disabled={busy}>
+                    {phase === 'overriding' ? 'Applying…' : 'Apply override'}
+                  </button>
                 </div>
-              )}
-              {(overrides.length > 0 || inspection.override_decision) && (
-                <div className="history">
-                  <div className="field__label">Override history</div>
-                  {overrides.length === 0 && (
-                    <div className="history__item">{inspection.override_decision}: {inspection.override_reason || 'no reason recorded'}</div>
-                  )}
-                  {overrides.map((item) => (
-                    <div key={item.override_id || item.created_at} className="history__item">
-                      <div className="history__head">
-                        <strong>{item.from_verdict} → {item.to_verdict}</strong>
-                        <span>by {item.operator_id || 'operator'}{item.role ? ` (${item.role})` : ''} · {formatTime(item.created_at)}</span>
-                      </div>
-                      <div>{item.reason}</div>
-                    </div>
-                  ))}
+                <div className="field">
+                  <label htmlFor="override-reason" className="field-label">Reason (required)</label>
+                  <textarea
+                    id="override-reason"
+                    className="filter-input full"
+                    value={overrideReason}
+                    onChange={(event) => setOverrideReason(event.target.value)}
+                    rows={3}
+                    required
+                    disabled={busy}
+                    placeholder="Why does the operator disagree with the agent?"
+                  />
                 </div>
-              )}
-            </Card>
-
-            {(inspection.images || []).length > 0 && (
-              <Card title="Evidence images" icon="image" actions={<Badge tone="neutral" dot={false}>{inspection.images.length}</Badge>}>
-                <div className="gallery">
-                  {inspection.images.map((image) => (
-                    <figure key={image.image_id} className="thumb evidence-card">
-                      <EvidenceImage inspectionId={inspection.inspection_id} imageId={image.image_id} alt={image.filename} />
-                      <figcaption>
-                        <span className="thumb__view">{viewLabel(image.image_type)}</span>
-                        <span className="thumb__name">{image.filename}</span>
-                      </figcaption>
-                    </figure>
-                  ))}
-                </div>
-              </Card>
+                {overrideNote && <div className="verify-result bad">{overrideNote}</div>}
+              </>
             )}
-          </section>
-        )}
+            {(overrides.length > 0 || inspection.override_decision) && (
+              <div className="field">
+                <span className="field-label">Override history</span>
+                <OverrideTimeline
+                  overrides={overrides}
+                  fallback={inspection.override_decision ? { decision: inspection.override_decision, reason: inspection.override_reason } : null}
+                />
+              </div>
+            )}
+          </Card>
+
+          {(inspection.images || []).length > 0 && (
+            <Card title="Evidence images" actions={<span className="page-badge">{inspection.images.length}</span>}>
+              <Gallery inspectionId={inspection.inspection_id} images={inspection.images} />
+            </Card>
+          )}
+        </section>
+      )}
+
+      <div className={`loading-overlay ${busy ? 'active' : ''}`} aria-hidden={!busy}>
+        <div className="loading-spinner" />
+        <div className="loading-text">{PHASE_TEXT[phase] || ''}</div>
       </div>
-    </div>
+    </>
   );
 }

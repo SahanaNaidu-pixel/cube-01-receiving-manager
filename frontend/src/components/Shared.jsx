@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { fetchInspectionImageUrl, verifyInspection } from '../services/api';
-import { checkCategory, checkMeta, decisionMeta, shortHash } from '../constants';
+import { checkCategory, checkMeta, decisionMeta, formatTime, shortHash, viewLabel } from '../constants';
 
 // Stroke icons (24px grid). Each entry is one SVG path string.
 const ICONS = {
@@ -34,6 +34,9 @@ const ICONS = {
   activity: 'M22 12h-4l-3 9L9 3l-3 9H2',
   minus: 'M8 12h8M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z',
   ruler: 'M21.3 8.7L8.7 21.3a1 1 0 0 1-1.4 0l-4.6-4.6a1 1 0 0 1 0-1.4L15.3 2.7a1 1 0 0 1 1.4 0l4.6 4.6a1 1 0 0 1 0 1.4zM7.5 10.5l2 2M10.5 7.5l2 2M13.5 4.5l2 2M4.5 13.5l2 2',
+  home: 'M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM9 22V12h6v10',
+  arrowRight: 'M5 12h14M12 5l7 7-7 7',
+  xCircle: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM15 9l-6 6M9 9l6 6',
 };
 
 export function Icon({ name, size = 18, className = '' }) {
@@ -56,41 +59,29 @@ export function Icon({ name, size = 18, className = '' }) {
   );
 }
 
-export function Badge({ tone = 'neutral', children, dot = true, className = '' }) {
-  return (
-    <span className={`badge badge--${tone} ${className}`}>
-      {dot && <span className="badge__dot" aria-hidden="true" />}
-      {children}
-    </span>
-  );
-}
-
+// Decision pill (PASS, EXCEPTION, …) in the design's verdict-badge style.
 export function DecisionPill({ decision }) {
-  const meta = decisionMeta(decision || 'NOT_ANALYZED');
-  return <Badge tone={meta.tone}>{meta.label}</Badge>;
+  const value = decision || 'NOT_ANALYZED';
+  return <span className={`verdict-badge v-${value}`}>{decisionMeta(value).label}</span>;
 }
 
 export function CheckStatus({ status }) {
-  const meta = checkMeta(status);
-  return <Badge tone={meta.tone}>{meta.label}</Badge>;
+  return <span className={`verdict-badge v-${status}`}>{checkMeta(status).label}</span>;
 }
 
-export function Card({ title, icon, actions, subtitle, children, className = '', ...rest }) {
+export function Card({ title, sub, actions, children, className = '', flush = false, ...rest }) {
   return (
     <section className={`card ${className}`} {...rest}>
       {(title || actions) && (
-        <header className="card__header">
-          <div className="card__heading">
-            {icon && <span className="card__icon"><Icon name={icon} size={16} /></span>}
-            <div>
-              {title && <h2 className="card__title">{title}</h2>}
-              {subtitle && <p className="card__subtitle">{subtitle}</p>}
-            </div>
+        <div className="card-header">
+          <div>
+            {title && <h2>{title}</h2>}
+            {sub && <div className="card-sub">{sub}</div>}
           </div>
-          {actions && <div className="card__actions">{actions}</div>}
-        </header>
+          {actions && <div className="card-actions">{actions}</div>}
+        </div>
       )}
-      <div className="card__body">{children}</div>
+      {flush ? children : <div className="card-body">{children}</div>}
     </section>
   );
 }
@@ -120,12 +111,10 @@ export function EvidenceImage({ inspectionId, imageId, alt }) {
 export function ErrorBanner({ message, onDismiss }) {
   if (!message) return null;
   return (
-    <div className="alert alert--danger" role="alert">
-      <Icon name="alert" />
-      <span className="alert__text">{message}</span>
-      {onDismiss && (
-        <button type="button" className="btn btn--ghost btn--sm" onClick={onDismiss} aria-label="Dismiss error">Dismiss</button>
-      )}
+    <div className="alert alert-danger" role="alert">
+      <Icon name="alert" size={16} />
+      <span className="alert-text">{message}</span>
+      {onDismiss && <button type="button" className="detail-btn" onClick={onDismiss}>Dismiss</button>}
     </div>
   );
 }
@@ -137,15 +126,26 @@ const fmt = (value) => {
   return String(value);
 };
 
-const checkLabel = (name) => {
+export const checkLabel = (name) => {
   const text = String(name).replace(/_check$/, '').replace(/_/g, ' ');
   return text === 'sku' ? 'SKU' : text.charAt(0).toUpperCase() + text.slice(1);
 };
 
+export function Confidence({ value }) {
+  if (typeof value !== 'number') return '—';
+  const pct = Math.round(value * 100);
+  return (
+    <span className="confidence">
+      <span className="confidence-bar"><span style={{ width: `${pct}%` }} /></span>
+      {pct}%
+    </span>
+  );
+}
+
 export function ChecksTable({ checks }) {
   return (
-    <div className="table-wrap">
-      <table className="table">
+    <div className="table-wrapper bordered">
+      <table className="data-table">
         <thead>
           <tr><th>Check</th><th>Expected</th><th>Observed</th><th>Confidence</th><th>Status</th><th>Reason</th></tr>
         </thead>
@@ -154,22 +154,15 @@ export function ChecksTable({ checks }) {
             const category = check.status === 'FAIL' ? checkCategory(check.check_name) : '';
             return (
               <tr key={check.check_name}>
-                <td className="table__strong">
+                <td>
                   {checkLabel(check.check_name)}
-                  {category && <span className="tag tag--danger">{category}</span>}
+                  {category && <span className="dup-flag">{category}</span>}
                 </td>
                 <td className="mono">{fmt(check.expected_value)}</td>
                 <td className="mono">{fmt(check.observed_value)}</td>
-                <td>
-                  {typeof check.confidence === 'number' ? (
-                    <span className="confidence">
-                      <span className="confidence__bar"><span style={{ width: `${Math.round(check.confidence * 100)}%` }} /></span>
-                      {Math.round(check.confidence * 100)}%
-                    </span>
-                  ) : '—'}
-                </td>
+                <td><Confidence value={check.confidence} /></td>
                 <td><CheckStatus status={check.status} /></td>
-                <td className="table__reason">
+                <td className="reason">
                   {check.reason}
                   {check.reason_code ? <span className="reason-code">{check.reason_code}</span> : null}
                 </td>
@@ -178,6 +171,26 @@ export function ChecksTable({ checks }) {
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// The same checks as "evidence DNA" cards, used inside the details modal.
+export function CheckCards({ checks }) {
+  return (
+    <div className="dna-node-grid">
+      {checks.map((check) => (
+        <div key={check.check_name} className="dna-node-card">
+          <div className="dna-node-header">
+            <span className="dna-node-source">{checkLabel(check.check_name)}</span>
+            <CheckStatus status={check.status} />
+          </div>
+          <div className="dna-node-field">Expected: <span className="dna-node-val">{fmt(check.expected_value)}</span></div>
+          <div className="dna-node-field">Observed: <span className="dna-node-val">{fmt(check.observed_value)}</span></div>
+          <div className="dna-node-field">Confidence: <Confidence value={check.confidence} /></div>
+          {check.reason && <div className="hint" style={{ marginTop: 6 }}>{check.reason}</div>}
+        </div>
+      ))}
     </div>
   );
 }
@@ -199,20 +212,20 @@ export function VerifyIntegrity({ inspectionId, compact = false }) {
   const { busy, result, error } = state;
   const recordCount = result ? (Array.isArray(result.records) ? result.records.length : result.records) : 0;
   return (
-    <div className={`verify ${compact ? 'verify--compact' : ''}`}>
-      <button type="button" className="btn btn--secondary btn--sm" onClick={run} disabled={busy}>
-        <Icon name="shield" size={15} />
-        {busy ? 'Verifying…' : 'Verify integrity'}
+    <div className="verify">
+      <button type="button" className={compact ? 'detail-btn' : 'btn-theme'} onClick={run} disabled={busy}>
+        {!compact && <Icon name="shield" size={15} />}
+        {busy ? 'Verifying…' : compact ? 'Verify' : 'Verify integrity'}
       </button>
       <div aria-live="polite">
-        {error && <div className="verify__result verify__result--bad">{error}</div>}
+        {error && <div className="verify-result bad">{error}</div>}
         {result && result.integrity_verified && (
-          <div className="verify__result verify__result--good">
-            <Icon name="check" size={14} /> Verified: {recordCount} record(s), latest hash {shortHash(result.latest_content_hash)}
+          <div className="verify-result good">
+            <Icon name="check" size={14} /> Verified: {recordCount} record(s){compact ? '' : `, latest hash ${shortHash(result.latest_content_hash)}`}
           </div>
         )}
         {result && !result.integrity_verified && (
-          <div className="verify__result verify__result--bad">
+          <div className="verify-result bad">
             Integrity NOT verified{recordCount ? '' : ' (no sealed records yet — analyze first)'}
             {(result.problems || []).length > 0 && (
               <ul>{result.problems.map((problem) => <li key={problem}>{problem}</li>)}</ul>
@@ -225,7 +238,7 @@ export function VerifyIntegrity({ inspectionId, compact = false }) {
 }
 
 // Accessible modal: Esc / backdrop click closes, focus moves into the dialog and back on close.
-export function Modal({ title, subtitle, onClose, children, footer }) {
+export function Modal({ title, subtitle, onClose, children, footer, wide = false }) {
   const dialogRef = useRef(null);
   useEffect(() => {
     const previous = document.activeElement;
@@ -241,20 +254,80 @@ export function Modal({ title, subtitle, onClose, children, footer }) {
   }, [onClose]);
 
   return (
-    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabIndex={-1} ref={dialogRef}>
-        <header className="modal__header">
+    <div className="modal-overlay open" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div className={`modal ${wide ? 'modal-wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="modal-title" tabIndex={-1} ref={dialogRef}>
+        <div className="modal-header">
           <div>
-            <h2 id="modal-title" className="modal__title">{title}</h2>
-            {subtitle && <p className="card__subtitle">{subtitle}</p>}
+            <h2 id="modal-title" className="modal-title">{title}</h2>
+            {subtitle && <div className="modal-sub">{subtitle}</div>}
           </div>
-          <button type="button" className="btn btn--ghost btn--icon" onClick={onClose} aria-label="Close dialog">
-            <Icon name="x" />
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Close dialog">
+            <Icon name="x" size={14} />
           </button>
-        </header>
-        <div className="modal__body">{children}</div>
-        {footer && <footer className="modal__footer">{footer}</footer>}
+        </div>
+        <div className="modal-body">{children}</div>
+        {footer && <div className="modal-actions">{footer}</div>}
       </div>
+    </div>
+  );
+}
+
+export function ModalSection({ title, children }) {
+  return (
+    <div className="modal-section">
+      <div className="modal-section-title">{title}</div>
+      {children}
+    </div>
+  );
+}
+
+export function HeroStats({ items, flush = false }) {
+  return (
+    <div className={`modal-hero-grid ${flush ? 'flush' : ''}`}>
+      {items.map((item) => (
+        <div key={item.label} className="modal-hero-stat">
+          <div className="modal-hero-lbl">{item.label}</div>
+          <div className={`modal-hero-val ${item.className || ''}`}>{item.value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function Gallery({ inspectionId, images }) {
+  return (
+    <div className="gallery">
+      {images.map((image) => (
+        <figure key={image.image_id} className="thumb">
+          <EvidenceImage inspectionId={inspectionId} imageId={image.image_id} alt={image.filename} />
+          <figcaption>
+            <span className="thumb-view">{viewLabel(image.image_type)}</span>
+            <span className="thumb-name">{image.filename}</span>
+          </figcaption>
+        </figure>
+      ))}
+    </div>
+  );
+}
+
+export function OverrideTimeline({ overrides, fallback }) {
+  if (!overrides.length && !fallback) return null;
+  return (
+    <div className="timeline-list flush">
+      {overrides.length === 0 && (
+        <div className="timeline-item item-charge">
+          <div className="timeline-content"><strong>{fallback.decision}</strong><p>{fallback.reason || 'no reason recorded'}</p></div>
+        </div>
+      )}
+      {overrides.map((item) => (
+        <div key={item.override_id || item.created_at} className="timeline-item item-charge">
+          <div className="timeline-content">
+            <strong>{item.from_verdict} → {item.to_verdict}</strong>
+            <p>{item.reason}</p>
+            <div className="timeline-meta">by {item.operator_id || 'operator'}{item.role ? ` (${item.role})` : ''} · {formatTime(item.created_at)}</div>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
