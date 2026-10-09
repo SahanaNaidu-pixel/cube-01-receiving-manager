@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
+import queue
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.core.config import get_settings
@@ -22,7 +25,7 @@ from backend.app.models.inspection import Inspection, InspectionCheck, Receiving
 from backend.app.models.po import PurchaseOrder
 from backend.app.services.storage import LocalStorage
 from backend.app.services.evidence_record import EPHEMERAL_MESSAGE, build_override_record, build_record, compute_hash, verify_seal
-from backend.app.services.vision import VisionService, demo_scenario_names, normalize_scenario
+from backend.app.services.vision import PerceptionNotConfigured, VisionService, demo_scenario_names, normalize_scenario
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/inspections", tags=["inspections"])
@@ -60,7 +63,6 @@ class InspectionOverrideRequest(BaseModel):
 
 # The keys shipped in .env.example are public, so they only work for a local demo.
 PLACEHOLDER_KEY_PREFIX = "change-me"
-KEYS_MISCONFIGURED = "Server API keys are misconfigured."
 
 
 def _public_failure_reason(exc: Exception) -> str:
@@ -96,16 +98,14 @@ def require_principal(x_api_key: str | None = Header(default=None)) -> dict:
     raw = get_settings().receiving_api_keys
     if not raw:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Authentication is not configured (RECEIVING_API_KEYS).")
-    # The reason goes to the server log only; unauthenticated callers just learn the keys are misconfigured.
     try:
         keys = _parse_api_keys(raw)
     except ValueError as exc:
-        log.error("RECEIVING_API_KEYS is malformed: %s", exc)
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=KEYS_MISCONFIGURED) from None
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"RECEIVING_API_KEYS is malformed: {exc}") from None
     if not get_settings().demo_mode and any(key.startswith(PLACEHOLDER_KEY_PREFIX) for key in keys):
-        log.error("RECEIVING_API_KEYS still contains the public 'change-me' example keys; "
-                  "they are only accepted with DEMO_MODE=true. Generate real keys.")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=KEYS_MISCONFIGURED)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="RECEIVING_API_KEYS still contains the public 'change-me' example keys; "
+                                   "they are only accepted with DEMO_MODE=true. Generate real keys.")
     if not x_api_key:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing X-API-Key header.")
     for key, principal in keys.items():
@@ -157,35 +157,20 @@ def _detect_image_mime(content: bytes) -> str:
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is not a valid supported image.")
 
 
-MAX_FILENAME_LENGTH = 100
-
-
-def _safe_filename(raw: str | None, suffix: str = "") -> str:
-    """Display-only basename: no path parts (/ or backslash), control chars or quotes, bounded length."""
-    name = re.split(r"[\\/]", raw or "")[-1]
-    name = re.sub(r"[\x00-\x1f\x7f\"';]", "", name).strip().strip(".")
-    if len(name) > MAX_FILENAME_LENGTH:
-        stem, ext = Path(name).stem, Path(name).suffix[:10]
-        name = stem[: MAX_FILENAME_LENGTH - len(ext)] + ext
-    return name or f"image{suffix}"
-
-
 def _validate_image_upload(file: UploadFile, inspection_id: str):
     settings = get_settings()
     allowed_types = {item.strip().lower() for item in settings.allowed_image_types.split(",") if item.strip()}
     allowed_exts = {item.strip().lower() for item in settings.allowed_extensions.split(",") if item.strip()}
 
-    raw_name = (file.filename or "upload").strip()
-    if not raw_name or raw_name in {".", ".."}:
+    original_name = (file.filename or "upload").strip()
+    if not original_name or original_name in {".", ".."}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file name is invalid.")
 
-    suffix = Path(raw_name).suffix.lower()
+    suffix = Path(original_name).suffix.lower()
     if not suffix:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"File has no extension; allowed: {', '.join(sorted(allowed_exts))}.")
     if suffix not in allowed_exts:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported file extension: {suffix}.")
-
-    original_name = _safe_filename(raw_name, suffix)  # the raw client name is never stored or echoed
 
     max_bytes = settings.max_image_size_mb * 1024 * 1024
     content = file.file.read(max_bytes + 1)
@@ -257,16 +242,6 @@ def get_inspection(inspection_id: str, principal: dict = Depends(require_princip
     return _view(_load(principal, inspection_id))
 
 
-def _check_image_count(inspection: Inspection, incoming: int, settings) -> None:
-    if len(inspection.images) + incoming > settings.upload_max_images:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Maximum image count exceeded for this inspection ({settings.upload_max_images}).")
-
-
-def upload_body_limit(settings) -> int:
-    """Largest upload request that could succeed: every allowed image at full size plus multipart overhead."""
-    return settings.upload_max_images * settings.max_image_size_mb * 1024 * 1024 + 1024 * 1024
-
-
 @router.post("/{inspection_id}/images")
 def upload_images(
     inspection_id: str,
@@ -274,17 +249,16 @@ def upload_images(
     image_type: str = Form("other"),
     principal: dict = Depends(require_principal),
 ):
-    inspection = _load(principal, inspection_id)
+    _load(principal, inspection_id)
     if not files:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No image files were provided")
-    settings = get_settings()
-    # Cheap pre-check before any file is read into memory; re-checked under the lock below.
-    _check_image_count(inspection, len(files), settings)
     validated_files = [_validate_image_upload(file, inspection_id) for file in files]  # all-or-nothing: validate first
     view = _contract_view(image_type)
+    settings = get_settings()
     with _inspection_lock(principal["organization_id"], inspection_id):
         inspection = _load(principal, inspection_id)
-        _check_image_count(inspection, len(validated_files), settings)
+        if len(inspection.images) + len(validated_files) > settings.upload_max_images:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Maximum image count exceeded for this inspection ({settings.upload_max_images}).")
         saved_images: list[ReceivingImage] = []
         try:
             for validated in validated_files:
@@ -332,37 +306,104 @@ def get_inspection_image(inspection_id: str, image_id: str, principal: dict = De
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image file not found")
 
-    # Re-sanitize: records stored before filenames were cleaned may still hold a raw client name.
-    filename = _safe_filename(image_record.filename, file_path.suffix)
-    return FileResponse(file_path, media_type=image_record.mime_type, filename=filename)
+    return FileResponse(file_path, media_type=image_record.mime_type, filename=image_record.filename)
 
 
 PERCEPTION_CHECKS = ("sku_check", "carton_check", "units_per_carton_check", "quantity_check",
                      "variant_check", "damage_check", "component_check")
 
 
-@router.post("/{inspection_id}/analyze")
-def analyze_inspection(inspection_id: str, scenario: str | None = None, principal: dict = Depends(require_principal)):
-    settings = get_settings()
+def _check_scenario(scenario: str | None, settings) -> None:
     if settings.demo_mode and scenario and normalize_scenario(scenario) not in demo_scenario_names():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail=f"Unknown demo scenario. Known: {', '.join(demo_scenario_names())}.")
+
+
+@router.post("/{inspection_id}/analyze")
+def analyze_inspection(inspection_id: str, scenario: str | None = None, principal: dict = Depends(require_principal)):
+    settings = get_settings()
+    _check_scenario(scenario, settings)
     with _inspection_lock(principal["organization_id"], inspection_id):
         return _analyze_locked(principal, inspection_id, scenario, settings)
 
 
-def _analyze_locked(principal: dict, inspection_id: str, scenario: str | None, settings) -> dict:
+@router.post("/{inspection_id}/analyze/stream")
+def analyze_inspection_stream(inspection_id: str, scenario: str | None = None, principal: dict = Depends(require_principal)):
+    """Same analysis as /analyze, streamed as NDJSON: one event per real pipeline step, then `done` with the result.
+
+    Events: {type, message, t_ms, ...}. While the model call is in flight a `heartbeat` reports the real elapsed time;
+    nothing is simulated. Request errors (404, no images, bad scenario) are raised before the stream starts.
+    """
+    settings = get_settings()
+    _check_scenario(scenario, settings)
+    if not _load(principal, inspection_id).images:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No images uploaded for analysis")
+    events: queue.Queue = queue.Queue()
+    started = time.monotonic()
+
+    def emit(event_type: str, message: str, **data):
+        events.put({"type": event_type, "message": message, "t_ms": int((time.monotonic() - started) * 1000), **data})
+
+    def work():
+        try:
+            with _inspection_lock(principal["organization_id"], inspection_id):
+                result = _analyze_locked(principal, inspection_id, scenario, settings, emit)
+            emit("done", f"Finished: {result['decision']}.", result=result)
+        except HTTPException as exc:
+            emit("error", str(exc.detail), status=exc.status_code)
+        except Exception as exc:  # the record was not written; say so instead of hanging the stream
+            log.exception("Streamed analysis failed for %s", inspection_id)
+            emit("error", _public_failure_reason(exc), status=500)
+        finally:
+            events.put(None)
+
+    threading.Thread(target=work, daemon=True).start()
+
+    async def stream():
+        # Async polling: a waiting stream holds no threadpool thread (sync endpoints share that pool).
+        # If the client disconnects, the worker still finishes and seals the record (fail-open: work is never lost).
+        last_beat = time.monotonic()
+        while True:
+            try:
+                item = events.get_nowait()
+            except queue.Empty:
+                now = time.monotonic()
+                if now - last_beat >= 1.0:
+                    last_beat = now
+                    yield json.dumps({"type": "heartbeat", "message": f"Waiting on perception… {now - started:.0f}s",
+                                      "t_ms": int((now - started) * 1000)}) + "\n"
+                await asyncio.sleep(0.05)
+                continue
+            if item is None:
+                return
+            last_beat = time.monotonic()
+            yield json.dumps(item, default=str) + "\n"
+
+    # X-Accel-Buffering: proxies (nginx, Render) must not buffer the stream, or "real time" arrives all at once.
+    return StreamingResponse(stream(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _analyze_locked(principal: dict, inspection_id: str, scenario: str | None, settings, emit=None) -> dict:
+    emit = emit or (lambda *args, **kwargs: None)
     inspection = _load(principal, inspection_id)
     if not inspection.images:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No images uploaded for analysis")
+    emit("start", f"Inspection {inspection_id}: {len(inspection.images)} photo(s) against PO {inspection.po.po_id}.",
+         images=len(inspection.images), po_id=inspection.po.po_id)
 
     service = VisionService(inspection)
     failure_reason = None
     try:
-        result = service.analyze(scenario=scenario if settings.demo_mode else None)
+        result = service.analyze(scenario=scenario if settings.demo_mode else None, emit=emit)
     except Exception as exc:  # fail-open: any perception failure holds the shipment for a human
-        log.exception("Perception failed for %s", inspection_id)
+        if isinstance(exc, PerceptionNotConfigured):
+            log.warning("Perception not configured; %s held for review", inspection_id)
+        else:
+            log.exception("Perception failed for %s", inspection_id)
         failure_reason = _public_failure_reason(exc)
+        emit("perception_failed", f"Perception unavailable: {failure_reason}. Holding for human review (fail-open).",
+             failure_reason=failure_reason)
         result = {
             "decision": "PENDING_REVIEW",
             "model_version": service.model_version,
@@ -376,6 +417,10 @@ def _analyze_locked(principal: dict, inspection_id: str, scenario: str | None, s
             "evidence": [],
             "observations": [],
         }
+
+    for check in result["checks"]:
+        emit("check", f"{check['check_name']}: {check['status']} ({check['reason_code']}).", check=check)
+    emit("decision", f"Rules engine verdict: {result['decision']}.", decision=result["decision"])
 
     inspection.checks = [InspectionCheck.model_validate(item) for item in result["checks"]]
     inspection.evidence = [Evidence.model_validate(item) for item in result["evidence"]]
@@ -398,6 +443,8 @@ def _analyze_locked(principal: dict, inspection_id: str, scenario: str | None, s
             evidence=result["evidence"],
         ),
     )
+    emit("sealed", f"Evidence record v{record['version']} sealed ({record['content_hash'][:12]}…).",
+         version=record["version"], content_hash=record["content_hash"])
 
     return {
         "inspection_id": inspection_id,
@@ -405,8 +452,12 @@ def _analyze_locked(principal: dict, inspection_id: str, scenario: str | None, s
         "checks": result["checks"],
         "evidence": result["evidence"],
         "observations": result["observations"],
-        "demo_mode": settings.demo_mode,
-        "analysis_status": "pending_review" if failure_reason else ("demo" if settings.demo_mode else "complete"),
+        "demo_mode": service.demo,  # true only when scripted demo readings produced this result
+        "second_look": service.second_look,  # None = not needed; {checks, settled, ...} or {failed} otherwise
+        "usage": service.usage or None,  # real token counts reported by the provider (summed over both calls)
+        "warnings": service.warnings,
+        "model_version": result["model_version"],
+        "analysis_status": "pending_review" if failure_reason else ("demo" if service.demo else "complete"),
         "failure_reason": failure_reason,
         "agent_summary": inspection.agent_summary,
         "record": record,

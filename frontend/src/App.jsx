@@ -1,341 +1,379 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getApiKey, getInspection, healthCheck, listInspections, setApiKey } from './services/api';
-import { PO_PRESETS, effectiveDecision, failedCategories, isAnalyzed } from './constants';
+import { PO_PRESETS, isAnalyzed } from './constants';
 import { poToForm } from './components/PoEditor';
 import { ErrorBanner, Icon } from './components/Shared';
-import LandingPage from './components/LandingPage';
-import DashboardView, { PIPELINE } from './components/DashboardView';
 import ScannerView from './components/ScannerView';
 import BenchmarkView from './components/BenchmarkView';
 import LedgerView from './components/LedgerView';
 import RulesView from './components/RulesView';
+import OverviewView from './components/OverviewView';
+import EvidenceView from './components/EvidenceView';
+import { CatalogueView, PurchaseOrdersView } from './components/ReferenceViews';
+import ActivityView from './components/ActivityView';
+import SettingsView from './components/SettingsView';
 
-const VIEWS = [
-  { key: 'dashboard', section: 'Overview', label: 'Dashboard', icon: 'grid' },
-  { key: 'scanner', section: 'Receiving', label: 'Receiving Inspection', icon: 'scan' },
-  { key: 'ledger', section: 'Receiving', label: 'Inspections', icon: 'list' },
-  { key: 'benchmark', section: 'Quality', label: 'Scenario Benchmark', icon: 'gauge' },
-  { key: 'rules', section: 'Quality', label: 'Receiving Rules', icon: 'book' },
+const NAV = [
+  { group: 'Receiving', items: [
+    { key: 'overview', label: 'Overview', icon: 'home', title: 'Overview', subtitle: 'Receiving inspection activity across your organization, from the inspection records.' },
+    { key: 'inspect', label: 'New Inspection', icon: 'scan', title: 'New inspection', subtitle: 'Check a supplier delivery against its PO line: enter the expected values, upload evidence, run the agent and review the verdict.' },
+    { key: 'history', label: 'Inspection History', icon: 'list', title: 'Inspection history', subtitle: 'Every inspection, its verdict and its sealed evidence record.' },
+    { key: 'evidence', label: 'Evidence Center', icon: 'image', title: 'Evidence center', subtitle: 'Photos stored with each inspection and the readings recorded for them.' },
+  ] },
+  { group: 'Reference data', items: [
+    { key: 'catalogue', label: 'Product Catalogue', icon: 'package', title: 'Product catalogue', subtitle: 'Products seen on inspection PO lines (derived, read-only).' },
+    { key: 'orders', label: 'Purchase Orders', icon: 'clipboard', title: 'Purchase orders', subtitle: 'PO lines received and inspected (derived, read-only).' },
+  ] },
+  { group: 'System', items: [
+    { key: 'activity', label: 'Agent Activity', icon: 'activity', title: 'Agent activity', subtitle: 'Service health, inspection lifecycle events, API outcomes and integration status.' },
+    { key: 'rules', label: 'Decision Rules', icon: 'book', title: 'How the agent decides', subtitle: 'What the model does, what the rules do, and when a person has to look.' },
+    { key: 'benchmark', label: 'Rules Benchmark', icon: 'gauge', title: 'Rules benchmark', subtitle: 'Scripted readings that exercise every verdict path of the rules engine. It tests the rules, not the vision model.' },
+    { key: 'settings', label: 'Settings', icon: 'settings', title: 'Settings', subtitle: 'Operator key, appearance and backend configuration.' },
+  ] },
 ];
-const SECTIONS = [...new Set(VIEWS.map((item) => item.section))];
+const ROUTES = NAV.flatMap((group) => group.items);
 const THEME_KEY = 'receivingTheme';
+const HEALTH_POLL_MS = 30000;
+const OFFLINE_POLL_MS = 4000; // while the backend is down, look for it often so the app recovers on its own
+const LIST_POLL_MS = 15000;
 
-function initialTheme() {
+const routeFromHash = () => {
+  const key = window.location.hash.replace(/^#\/?/, '').split('/')[0];
+  return ROUTES.some((route) => route.key === key) ? key : 'overview';
+};
+
+function initialThemePref() {
   try {
     const stored = localStorage.getItem(THEME_KEY);
-    if (stored === 'light' || stored === 'dark') return stored;
+    if (['light', 'dark', 'system'].includes(stored)) return stored;
   } catch { /* storage blocked */ }
-  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  return 'light';
 }
+const resolveTheme = (pref) => (pref === 'system'
+  ? (window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+  : pref);
 
-// Hash routes: "#/" is the public landing page, "#/app/<view>" is the workspace.
-function readRoute() {
-  const parts = window.location.hash.replace(/^#\/?/, '').split('/');
-  if (parts[0] !== 'app') return { page: 'landing', view: 'dashboard' };
-  return { page: 'app', view: VIEWS.some((item) => item.key === parts[1]) ? parts[1] : 'dashboard' };
+const PROBE_TEXT = {
+  ok: ['ok', 'Vision ready'],
+  reachable: ['ok', 'Vision reachable'],
+  not_configured: ['bad', 'Vision: no key'],
+  key_rejected: ['bad', 'Vision: key rejected'],
+  model_not_found: ['bad', 'Vision: model not found'],
+  no_access: ['bad', 'Vision: no access'],
+  unreachable: ['bad', 'Vision unreachable'],
+  rate_limited: ['warn', 'Vision rate-limited'],
+  error: ['warn', 'Vision check failed'],
+};
+
+function StatusChips({ health, onRecheck }) {
+  if (health.ok === false) {
+    return (
+      <button type="button" className="chip chip--bad" onClick={onRecheck} title="GET /api/health is not answering. Retrying automatically; click to retry now.">
+        <span className="chip__dot" />Backend offline
+      </button>
+    );
+  }
+  if (health.ok === null) return <span className="chip"><span className="chip__dot" />Checking backend…</span>;
+  const p = health.perception;
+  const [tone, text] = p ? (PROBE_TEXT[p.probe] || (p.mode === 'live' ? ['warn', 'Vision unverified'] : ['bad', 'Vision: no key'])) : ['neutral', 'Vision…'];
+  return (
+    <>
+      <span className="chip chip--ok hide-md" title="GET /api/health answered"><span className="chip__dot" />API online</span>
+      <button type="button" className={`chip chip--${tone}`} onClick={onRecheck}
+        title={`${p?.probe_detail || ''} ${p ? `Model ${p.model} via ${p.api_style}.` : ''} Click to re-check now.`}>
+        <span className="chip__dot" />{text}
+      </button>
+    </>
+  );
 }
 
 export default function App() {
-  const [route, setRoute] = useState(readRoute);
+  const [view, setView] = useState(routeFromHash);
+  const [navOpen, setNavOpen] = useState(false);
   const [error, setError] = useState('');
-  const [keyInput, setKeyInput] = useState(getApiKey);
-  const [connection, setConnection] = useState({ state: 'idle', message: 'Not connected' });
-  const [health, setHealth] = useState({ ok: null, text: 'Backend: checking…' });
+  const [connection, setConnection] = useState({ state: 'idle', message: 'Not connected. Add an operator API key in Settings.' });
+  const [health, setHealth] = useState({ ok: null, perception: null, limits: null, checkedAt: null });
   const [inspections, setInspections] = useState([]);
   const [loadingList, setLoadingList] = useState(false);
-  const [demoMode, setDemoMode] = useState(null);
-  const [theme, setTheme] = useState(initialTheme);
-  const [navOpen, setNavOpen] = useState(false);
+  const [listError, setListError] = useState('');
+  const [lastSync, setLastSync] = useState(null);
+  const [themePref, setThemePref] = useState(initialThemePref);
+  const [theme, setTheme] = useState(() => resolveTheme(initialThemePref()));
+  const [live, setLive] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState({ key: 'all', n: 0 });
 
   const [poForm, setPoForm] = useState(() => poToForm(PO_PRESETS[0]));
   const [inspection, setInspection] = useState(null);
   const [analysis, setAnalysis] = useState(null);
-  // True while ScannerView has a create/upload/analyze/override in flight. Its handlers write the
-  // result into `inspection` when they finish, so opening another inspection meanwhile would be clobbered.
-  const scannerBusyRef = useRef(false);
-  const handleScannerBusy = useCallback((value) => { scannerBusyRef.current = value; }, []);
+  const mainRef = useRef(null);
 
   const connected = connection.state === 'connected';
-  const view = route.view;
 
+  // ---- routing (hash based, so back/forward and deep links work without a router dependency) ----------
   useEffect(() => {
-    const onHash = () => { setRoute(readRoute()); window.scrollTo(0, 0); };
+    const onHash = () => { setView(routeFromHash()); setNavOpen(false); };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+  const navigate = useCallback((key) => {
+    if (window.location.hash !== `#/${key}`) window.location.hash = `/${key}`;
+    else setView(key);
+    setNavOpen(false);
+    mainRef.current?.focus({ preventScroll: true });
+    window.scrollTo({ top: 0 });
+  }, []);
 
+  // ---- theme -------------------------------------------------------------------------------------------
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    try { localStorage.setItem(THEME_KEY, theme); } catch { /* storage blocked */ }
-  }, [theme]);
+    setTheme(resolveTheme(themePref));
+    try { localStorage.setItem(THEME_KEY, themePref); } catch { /* storage blocked */ }
+    if (themePref !== 'system' || !window.matchMedia) return undefined;
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => setTheme(resolveTheme('system'));
+    media.addEventListener?.('change', onChange);
+    return () => media.removeEventListener?.('change', onChange);
+  }, [themePref]);
+  useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
 
-  const toggleTheme = () => setTheme((value) => (value === 'dark' ? 'light' : 'dark'));
-
-  const checkHealth = useCallback(async () => {
+  // ---- health ------------------------------------------------------------------------------------------
+  // The probe really asks the AI provider whether the key works for the model (cached on the server).
+  const checkHealth = useCallback(async (force = false) => {
     try {
-      const result = await healthCheck();
-      setHealth({ ok: true, text: `Backend: ${result.status || 'ok'}` });
-    } catch (err) {
-      setHealth({ ok: false, text: `Backend: ${err.status ? `error ${err.status}` : 'unreachable'}` });
+      const result = await healthCheck({ probe: true, force });
+      setHealth({ ok: true, perception: result.perception || null, limits: result.limits || null, checkedAt: new Date().toISOString() });
+    } catch {
+      setHealth((current) => ({ ...current, ok: false, perception: null, checkedAt: new Date().toISOString() }));
     }
   }, []);
 
-  const refreshInspections = useCallback(async () => {
-    setLoadingList(true);
+  useEffect(() => {
+    const every = health.ok === false ? OFFLINE_POLL_MS : HEALTH_POLL_MS;
+    const timer = setInterval(() => { if (!document.hidden) checkHealth(); }, every);
+    return () => clearInterval(timer);
+  }, [checkHealth, health.ok]);
+
+  // ---- inspections -------------------------------------------------------------------------------------
+  const refreshInspections = useCallback(async ({ quiet = false } = {}) => {
+    if (!quiet) setLoadingList(true);
     try {
       const result = await listInspections();
-      const items = result.items || [];
-      setInspections(items);
-      setConnection((current) => (current.state === 'connected'
-        ? { ...current, message: `Connected · ${result.count ?? items.length} inspection(s)` }
-        : current));
+      setInspections(result.items || []);
+      setLastSync(new Date());
+      setListError('');
       return true;
     } catch (err) {
-      setError(err.message);
+      if (!quiet) setListError(err.message);
       if (err.status === 401 || err.status === 503) setConnection({ state: 'error', message: err.message });
       return false;
     } finally {
-      setLoadingList(false);
+      if (!quiet) setLoadingList(false);
     }
   }, []);
+
+  // Data pages stay current while on screen (other operators may be inspecting too).
+  useEffect(() => {
+    if (!connected || ['inspect', 'settings', 'rules', 'benchmark'].includes(view)) return undefined;
+    const timer = setInterval(() => { if (!document.hidden) refreshInspections({ quiet: true }); }, LIST_POLL_MS);
+    return () => clearInterval(timer);
+  }, [connected, view, refreshInspections]);
 
   const connect = useCallback(async (key) => {
     setApiKey(key.trim());
     setError('');
     setConnection({ state: 'checking', message: 'Connecting…' });
     checkHealth();
+    setLoadingList(true);
     try {
       const result = await listInspections();
       setInspections(result.items || []);
-      setConnection({ state: 'connected', message: `Connected · ${result.count ?? (result.items || []).length} inspection(s)` });
+      setLastSync(new Date());
+      setListError('');
+      setConnection({ state: 'connected', message: 'Connected' });
     } catch (err) {
       const message = err.status === 401
-        ? 'Invalid or missing API key (401). Check the key and try again.'
-        : err.status === 503
-          ? `Backend not ready (503): ${err.message}`
-          : err.message;
+        ? 'Invalid or missing operator key (401). Check the key and try again.'
+        : err.status === 503 ? `Backend not ready (503): ${err.message}` : err.message;
       setConnection({ state: 'error', message });
-      setError(message);
+      setListError(message);
+    } finally {
+      setLoadingList(false);
     }
   }, [checkHealth]);
+
+  const signOut = useCallback(() => {
+    setApiKey('');
+    setInspections([]);
+    setLastSync(null);
+    setConnection({ state: 'idle', message: 'Signed out. Add an operator API key to continue.' });
+  }, []);
+
+  // Backend came back (or was down when the page loaded): reconnect with the saved key.
+  useEffect(() => {
+    if (health.ok && getApiKey() && ['idle', 'error'].includes(connection.state) && !/401|Invalid|Signed out/.test(connection.message)) {
+      connect(getApiKey());
+    }
+  }, [health.ok]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (getApiKey()) connect(getApiKey());
     else checkHealth();
   }, [connect, checkHealth]);
 
-  const goTo = (key) => {
-    setNavOpen(false);
-    window.location.hash = `#/app/${key}`;
-  };
-  const goHome = () => {
-    setNavOpen(false);
-    window.location.hash = '#/';
-  };
-
-  const SCANNER_BUSY = 'The receiving workspace is still uploading or analyzing. Wait for it to finish before opening another inspection.';
   const openInspection = async (id) => {
-    if (scannerBusyRef.current) { setError(SCANNER_BUSY); return; }
+    if (live) {
+      setError('An inspection is still running. Open another one when it finishes.');
+      return;
+    }
     setError('');
     try {
       const loaded = await getInspection(id);
-      if (scannerBusyRef.current) { setError(SCANNER_BUSY); return; } // a run started while loading
       setInspection(loaded);
       setAnalysis(null);
       if (loaded.po) setPoForm(poToForm(loaded.po));
-      goTo('scanner');
+      navigate('inspect');
     } catch (err) {
       setError(err.message);
     }
   };
 
-  const stats = useMemo(() => {
-    const counts = { PASS: 0, EXCEPTION: 0, UNCERTAIN: 0, PENDING_REVIEW: 0, NOT_ANALYZED: 0 };
-    const categories = {};
-    let images = 0;
-    inspections.forEach((item) => {
-      const decision = isAnalyzed(item) ? effectiveDecision(item) : 'NOT_ANALYZED';
-      counts[decision] = (counts[decision] || 0) + 1;
-      failedCategories(item).forEach((category) => { categories[category] = (categories[category] || 0) + 1; });
-      images += item.images?.length ?? 0;
-    });
-    return { total: inspections.length, counts, categories, images };
-  }, [inspections]);
+  // Prefill a fresh inspection with a PO line taken from a real record (catalogue / purchase-order pages).
+  const startWithPo = (po) => {
+    if (live) { setError('An inspection is still running. Start another one when it finishes.'); return; }
+    setInspection(null);
+    setAnalysis(null);
+    setPoForm(poToForm(po));
+    navigate('inspect');
+  };
 
-  // Pipeline position of the inspection open in the workspace (index of the first unfinished stage).
-  const pipelineDone = [
-    true,
-    (inspection?.images?.length ?? 0) > 0,
-    isAnalyzed(inspection),
-    Boolean(inspection?.record),
-  ];
-  const pipelineIndex = pipelineDone.indexOf(false) === -1 ? PIPELINE.length : pipelineDone.indexOf(false);
+  const startNewInspection = () => {
+    if (!live && inspection && isAnalyzed(inspection)) { setInspection(null); setAnalysis(null); }
+    navigate('inspect');
+  };
 
-  const current = VIEWS.find((item) => item.key === view) || VIEWS[0];
-  const healthTone = health.ok === null ? 'checking' : health.ok ? 'connected' : 'error';
-  const badgeClass = connected ? 'badge-connected' : connection.state === 'error' ? 'badge-error' : '';
+  const filterHistory = (key) => {
+    setHistoryFilter((current) => ({ key, n: current.n + 1 }));
+    navigate('history');
+  };
+
+  const refreshAll = () => { checkHealth(true); if (connected) refreshInspections(); };
+
+  const current = ROUTES.find((item) => item.key === view) || ROUTES[0];
+  const group = NAV.find((g) => g.items.includes(current))?.group;
+  const dataProps = { inspections, connected, loading: loadingList, error: listError, onRefresh: () => refreshInspections(), onConnect: () => navigate('settings') };
 
   return (
-    <>
-      <div id="publicPagesContainer" className={`page-view ${route.page === 'landing' ? 'active' : ''}`}>
-        {route.page === 'landing' && <LandingPage theme={theme} onToggleTheme={toggleTheme} onOpenApp={goTo} health={health} />}
-      </div>
-
-      {/* The workspace stays mounted while on the landing page so queued photos and results survive. */}
-      <div id="appWorkspaceContainer" className={`page-view ${route.page === 'app' ? 'active' : ''} ${navOpen ? 'nav-open' : ''}`}>
-        <aside className="sidebar" aria-label="Main navigation">
-          <button type="button" className="sidebar-logo" onClick={goHome} title="Back to the home page">
-            <span className="logo-icon"><Icon name="box" size={18} /></span>
-            <span>
-              <span className="logo-title" style={{ display: 'block' }}>Receiving</span>
-              <span className="logo-sub">Manager · Pod 01</span>
-            </span>
-          </button>
-
-          <nav className="sidebar-nav">
-            {SECTIONS.map((section) => (
-              <div key={section}>
-                <div className="nav-section">{section}</div>
-                {VIEWS.filter((item) => item.section === section).map((item) => (
-                  <button
-                    key={item.key}
-                    type="button"
-                    aria-current={view === item.key ? 'page' : undefined}
-                    className={`nav-item ${view === item.key ? 'active' : ''}`}
-                    onClick={() => goTo(item.key)}
-                  >
-                    <span className="nav-icon"><Icon name={item.icon} size={17} /></span>
-                    <span>{item.label}</span>
-                    {item.key === 'ledger' && connected && <span className="nav-count">{stats.total}</span>}
-                  </button>
-                ))}
-              </div>
-            ))}
-          </nav>
-
-          <div className="sidebar-footer">
-            <div className="pipeline-title">Current inspection</div>
-            <div className="pipeline-badge">
-              {PIPELINE.map((step, index) => (
-                <div key={step.label} className={`pipeline-step ${index < pipelineIndex ? 'done' : index === pipelineIndex ? 'active' : ''}`}>
-                  {index < pipelineIndex ? '✓' : `${index + 1}`} · {step.label}
-                </div>
+    <div className={`shell ${navOpen ? 'nav-open' : ''} ${live ? 'is-live' : ''}`}>
+      <a className="skip-link" href="#main" onClick={(event) => { event.preventDefault(); mainRef.current?.focus(); }}>Skip to content</a>
+      <aside className="sidebar" aria-label="Main navigation">
+        <a className="brand" href="#/overview" onClick={() => setNavOpen(false)}>
+          <span className="brand__mark" aria-hidden="true"><Icon name="box" size={18} /></span>
+          <span className="brand__text"><b>CUBE Receiving Manager</b><small>Inbound inspection agent</small></span>
+        </a>
+        <nav className="sidenav">
+          {NAV.map((section) => (
+            <div key={section.group} className="sidenav__group">
+              <div className="sidenav__label">{section.group}</div>
+              {section.items.map((item) => (
+                <a key={item.key} href={`#/${item.key}`} className={`sidenav__item ${view === item.key ? 'is-active' : ''}`}
+                  aria-current={view === item.key ? 'page' : undefined} onClick={() => setNavOpen(false)}>
+                  <Icon name={item.icon} size={17} />
+                  <span>{item.label}</span>
+                  {item.key === 'history' && connected && <span className="sidenav__count">{inspections.length}</span>}
+                  {item.key === 'inspect' && live && <span className="live-dot" aria-label="running" />}
+                </a>
               ))}
             </div>
-            <div className="status-list" aria-live="polite">
-              <div className="status-row"><span className={`status-dot ${connection.state}`} /><span>{connection.message}</span></div>
-              <div className="status-row"><span className={`status-dot ${healthTone}`} /><span>{health.text}</span></div>
-              <div className="status-row">
-                <span className={`status-dot ${demoMode === null ? '' : demoMode ? 'checking' : 'connected'}`} />
-                <span>Perception: {demoMode === null ? 'unknown' : demoMode ? 'demo' : 'live'}</span>
-              </div>
-            </div>
+          ))}
+        </nav>
+        <div className="sidebar__foot">
+          <button type="button" className={`operator ${connected ? 'is-on' : ''}`} onClick={() => navigate('settings')}>
+            <span className="operator__avatar"><Icon name="user" size={15} /></span>
+            <span className="operator__text"><b>{connected ? 'Operator connected' : 'Not signed in'}</b><small>{connected ? 'API key accepted' : 'Add an API key'}</small></span>
+            <span className={`chip__dot ${connected ? 'is-ok' : connection.state === 'error' ? 'is-bad' : ''}`} />
+          </button>
+        </div>
+      </aside>
+      <button type="button" className="scrim" aria-label="Close navigation" tabIndex={navOpen ? 0 : -1} onClick={() => setNavOpen(false)} />
+
+      <div className="main-col">
+        <header className="topbar">
+          <button type="button" className="btn btn--ghost btn--icon topbar__menu" onClick={() => setNavOpen(true)} aria-label="Open navigation" aria-expanded={navOpen}>
+            <Icon name="menu" />
+          </button>
+          <div className="topbar__title">
+            <div className="crumbs" aria-label="Breadcrumb"><span>Receiving Manager</span><Icon name="chevronRight" size={12} /><span>{group}</span></div>
+            <h1>{current.title}</h1>
           </div>
-        </aside>
-        <div className="sidebar-scrim" onClick={() => setNavOpen(false)} aria-hidden="true" />
-
-        <div className="main-content">
-          {demoMode && (
-            <div className="demo-banner" role="status">
-              <span>DEMO MODE — perception is simulated from the selected scenario</span>
-              <span>Not for real receiving decisions</span>
-            </div>
-          )}
-
-          <header className="topbar">
-            <div className="topbar-left">
-              <button type="button" className="btn-theme menu-btn" onClick={() => setNavOpen(true)} aria-label="Open navigation">
-                <Icon name="menu" size={16} />
+          <div className="topbar__end">
+            <StatusChips health={health} onRecheck={() => checkHealth(true)} />
+            <button type="button" className="btn btn--ghost btn--icon" onClick={refreshAll} aria-label="Refresh data and status" title="Refresh data and status" disabled={loadingList}>
+              {loadingList ? <span className="spinner" aria-hidden="true" /> : <Icon name="refresh" size={17} />}
+            </button>
+            <button type="button" className="btn btn--ghost btn--icon" onClick={() => setThemePref(theme === 'dark' ? 'light' : 'dark')}
+              aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
+              <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={17} />
+            </button>
+            {view !== 'inspect' && (
+              <button type="button" className="btn btn--primary topbar__cta" onClick={startNewInspection}>
+                <Icon name="plus" size={16} /><span className="hide-sm">New Inspection</span>
               </button>
-              <h1 className="page-title">{current.label}</h1>
-              <span className={`page-badge ${badgeClass}`} title={connection.message}>{connection.message}</span>
-            </div>
+            )}
+          </div>
+        </header>
 
-            <div className="topbar-right">
-              <form className="key-form" onSubmit={(event) => { event.preventDefault(); connect(keyInput); }}>
-                <label htmlFor="api-key" className="sr-only">Operator API key</label>
-                <input
-                  id="api-key"
-                  className="org-selector"
-                  type="password"
-                  autoComplete="off"
-                  value={keyInput}
-                  placeholder="Operator API key"
-                  onChange={(event) => setKeyInput(event.target.value)}
-                />
-                <button type="submit" className="btn-primary" disabled={connection.state === 'checking'}>
-                  <Icon name="key" size={15} /> {connection.state === 'checking' ? 'Connecting…' : 'Connect'}
-                </button>
-              </form>
-              <button
-                type="button"
-                className="btn-theme"
-                onClick={toggleTheme}
-                aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-              >
-                <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={15} /> {theme === 'dark' ? 'Light' : 'Dark'}
-              </button>
-            </div>
-          </header>
+        <main id="main" className="content" ref={mainRef} tabIndex={-1}>
+          <div className="page-head">
+            <p>{current.subtitle}</p>
+          </div>
 
-          <main>
-            {error && (
-              <div className="view-banner">
-                <ErrorBanner message={error} onDismiss={() => setError('')} />
+          <div className="toasts" aria-live="assertive">
+            <ErrorBanner message={error} onDismiss={() => setError('')} />
+          </div>
+          <div className="banner-stack">
+            {health.ok === false && (
+              <div className="alert alert--fail">
+                <Icon name="server" size={16} />
+                <span className="alert__text"><strong>The backend is not responding.</strong>
+                  Start it with <code>uvicorn backend.app.main:app --port 8000</code>. This page reconnects automatically as soon as it answers.</span>
+                <button type="button" className="btn btn--sm" onClick={() => checkHealth(true)}>Retry now</button>
               </div>
             )}
+            {!connected && connection.state !== 'checking' && view !== 'settings' && (
+              <div className="alert alert--warn">
+                <Icon name="key" size={16} />
+                <span className="alert__text">{connection.state === 'error' ? connection.message : 'Connect with an operator API key to inspect, view history and record overrides.'}</span>
+                <button type="button" className="btn btn--sm" onClick={() => navigate('settings')}>Open settings</button>
+              </div>
+            )}
+          </div>
 
-            {/* Views stay mounted (hidden) so queued photos and benchmark results survive navigation. */}
-            <section className={`view ${view === 'dashboard' ? 'active' : ''}`} aria-label="Dashboard">
-              <DashboardView
-                inspections={inspections}
-                stats={stats}
-                connected={connected}
-                pipelineIndex={pipelineIndex}
-                onOpenInspection={openInspection}
-                onNavigate={goTo}
-              />
-            </section>
-            <section className={`view ${view === 'scanner' ? 'active' : ''}`} aria-label="Receiving inspection">
-              <ScannerView
-                poForm={poForm}
-                setPoForm={setPoForm}
-                inspection={inspection}
-                setInspection={setInspection}
-                analysis={analysis}
-                setAnalysis={setAnalysis}
-                demoMode={demoMode}
-                setDemoMode={setDemoMode}
-                onChanged={refreshInspections}
-                onError={setError}
-                onBusyChange={handleScannerBusy}
-                onOpenBenchmark={() => goTo('benchmark')}
-              />
-            </section>
-            <section className={`view ${view === 'ledger' ? 'active' : ''}`} aria-label="Inspections">
-              <LedgerView
-                inspections={inspections}
-                loading={loadingList}
-                connected={connected}
-                onRefresh={refreshInspections}
-                onOpenInspection={openInspection}
-              />
-            </section>
-            <section className={`view ${view === 'benchmark' ? 'active' : ''}`} aria-label="Scenario benchmark">
-              <BenchmarkView
-                poForm={poForm}
-                demoMode={demoMode}
-                setDemoMode={setDemoMode}
-                onChanged={refreshInspections}
-                onOpenInspection={openInspection}
-              />
-            </section>
-            <section className={`view ${view === 'rules' ? 'active' : ''}`} aria-label="Receiving rules">
-              <RulesView />
-            </section>
-          </main>
-        </div>
+          {/* The workspace and benchmark stay mounted (hidden) so queued photos, a running analysis and benchmark results survive navigation. */}
+          <div hidden={view !== 'inspect'}>
+            <ScannerView poForm={poForm} setPoForm={setPoForm} inspection={inspection} setInspection={setInspection}
+              analysis={analysis} setAnalysis={setAnalysis} perception={health.perception} limits={health.limits}
+              onChanged={() => refreshInspections({ quiet: true })} onError={setError} onLiveChange={setLive} onNavigate={navigate} />
+          </div>
+          <div hidden={view !== 'benchmark'}>
+            <BenchmarkView poForm={poForm} perception={health.perception} onChanged={() => refreshInspections({ quiet: true })} onOpenInspection={openInspection} />
+          </div>
+          {view === 'overview' && (
+            <OverviewView {...dataProps} onNavigate={navigate} onOpenInspection={openInspection} onFilterHistory={filterHistory} />
+          )}
+          {view === 'history' && (
+            <LedgerView key={historyFilter.n} {...dataProps} lastSync={lastSync} initialFilter={historyFilter.key}
+              onOpenInspection={openInspection} onNewInspection={startNewInspection} />
+          )}
+          {view === 'evidence' && <EvidenceView {...dataProps} onOpenInspection={openInspection} onNavigate={navigate} />}
+          {view === 'catalogue' && <CatalogueView {...dataProps} onUsePo={startWithPo} onOpenInspection={openInspection} />}
+          {view === 'orders' && <PurchaseOrdersView {...dataProps} onUsePo={startWithPo} onOpenInspection={openInspection} />}
+          {view === 'activity' && <ActivityView health={health} connection={connection} inspections={inspections} connected={connected} onRecheck={() => checkHealth(true)} />}
+          {view === 'rules' && <RulesView perception={health.perception} />}
+          {view === 'settings' && (
+            <SettingsView themePref={themePref} setThemePref={setThemePref} connection={connection} onConnect={connect} onSignOut={signOut}
+              hasKey={Boolean(getApiKey())} health={health} onRecheck={() => checkHealth(true)} onNavigate={navigate} />
+          )}
+        </main>
       </div>
-    </>
+    </div>
   );
 }

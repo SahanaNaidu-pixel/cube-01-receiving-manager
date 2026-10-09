@@ -116,6 +116,10 @@ Backend settings are read from environment variables (or the repo-root `.env`); 
 | `AI_MODEL` (fallback `OPENAI_MODEL`) | `gpt-4o-mini` | Vision model name. |
 | `OPENAI_BASE_URL` | empty | Optional OpenAI-compatible endpoint. |
 | `AI_TIMEOUT_S` | `45` | Model request timeout in seconds. |
+| `AI_SECOND_LOOK` | `true` | One focused follow-up call when a check is left disputed or unclear. |
+| `AI_API_STYLE` | `auto` | `responses` (OpenAI Responses API), `chat` (Chat Completions, for OpenAI-compatible servers) or `auto` (chat when `OPENAI_BASE_URL` is set). |
+| `AI_STREAM` | `true` | Stream model output so the UI shows live which photo is being read. |
+| `AI_IMAGE_DETAIL` | `high` | Image detail sent to the model; `high` reads small label print, `low` is cheaper/faster. |
 | `DATABASE_URL` | `sqlite:///./receiving_manager.db` | Only file-backed `sqlite:///path` URLs are supported; relative paths resolve against the repo root. |
 | `UPLOAD_ROOT_DIR` | `uploads` | Directory for uploaded photos (relative to the working directory). |
 | `MAX_IMAGE_SIZE_MB` | `10` | Per-image size limit. |
@@ -186,7 +190,7 @@ Every `/api/inspections*` call needs an `X-API-Key` header with a key from `RECE
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/health` | No auth. |
+| GET | `/api/health` | No auth. `?probe=true` also asks the AI provider whether the key can use the model (cached 2 min; `&force=true` re-checks). |
 | GET | `/api/inspections` | List the organization's inspections. |
 | POST | `/api/inspections` | Body `{"po": {...}}` with `po_id`, `sku`, `product_name`, `expected_quantity`, `variant`, `units_per_carton`, `expected_cartons`, optional `expected_components`. |
 | GET | `/api/inspections/{inspection_id}` | Inspection with checks, evidence and decision. |
@@ -201,12 +205,11 @@ FastAPI also serves interactive API docs at http://localhost:8000/docs.
 ## AI workflow
 
 - load inspection photos from the storage layer
-- validate image availability and ownership
-- submit PO context and image metadata to the model
-- require structured JSON output
-- validate the AI response against a strict Pydantic contract
-- create evidence records and deterministic checks
-- let the Python decision engine resolve the final verdict
+- send all photos in ONE model call, blind: the model never sees the PO SKU, counts or variant (only the component names, as a checklist)
+- stream the structured JSON back; while it streams, the UI is told which photo the model is writing about (`model_reading`, `model_observation`, `model_progress` events on `/analyze/stream`)
+- validate tolerantly: match image ids case-insensitively, coerce reading types per check, ignore (and report) readings for unknown photos
+- fuse readings across photos (weighted vote), take one focused second look if a check is still disputed
+- let the deterministic Python decision engine resolve the final verdict and seal the record
 
 ## Decision logic
 
@@ -236,9 +239,20 @@ Every evidence item points back to a source image and stores:
 The system is deliberately conservative:
 
 - unobservable quantities become `UNCERTAIN`
-- ambiguous variants become `UNCERTAIN`
+- a reading that only *might* differ is `UNCERTAIN`, not `FAIL`: look-alike characters (O/0, I/1), a barcode read instead of the SKU, a partly matching variant ("Navy Blue" vs "Blue"), cosmetic marks, unrecognised damage wording, a unit count that cartons x units/carton does not back up
+- real-world wording is understood: "SKU: X" / "Item # X", "12 PCS", "no visible damage" / "undamaged", "caps" / "bottle cap", "missing cap" / "no cap"
 - damaged cartons must be clearly visible to trigger `FAIL`
 - missing components are only reported when visible evidence supports the finding
+
+## Real photos: troubleshooting
+
+If uploads of real photos "do nothing" or every run ends **On hold**:
+
+1. **No model key.** Without `AI_API_KEY` (or `OPENAI_API_KEY`) nothing can read the photos, so every run is held for review by design. The top bar shows *vision: no key*. Add the key to the repo-root `.env` and restart the backend; the chip turns *vision ready* once the provider accepts the key for `AI_MODEL`.
+2. **Key/model problems** show in the same chip (key rejected, model not found, rate-limited, unreachable). Click it to re-check now.
+3. **OpenAI-compatible servers** (Ollama, vLLM, LiteLLM, OpenRouter, Azure) usually only support Chat Completions; set `OPENAI_BASE_URL` and leave `AI_API_STYLE=auto`. The model must accept images.
+4. **Mostly Uncertain verdicts**: add a pallet photo that shows every carton (carton count and totals need it) and a sharp label close-up. Each Uncertain check in the Evidence panel says which photo would settle it.
+5. **Serverless hosting** (Vercel): SQLite and uploads live in `/tmp`, which instances do not share, so an upload and the following analyze can land on different instances. Use the Docker / Render deployment (one instance, one disk) for real use.
 
 ## Security
 

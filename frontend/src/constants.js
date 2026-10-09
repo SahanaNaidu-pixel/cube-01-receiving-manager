@@ -1,3 +1,5 @@
+// Sample PO lines to start from. They are example data (not from any real supplier); edit the manifest or
+// type your own PO line before inspecting a real delivery.
 export const PO_PRESETS = [
   {
     po_id: 'PO-9001',
@@ -33,36 +35,58 @@ export const PO_PRESETS = [
 
 // Keys must match the backend demo scenarios exactly.
 export const SCENARIOS = [
-  { key: 'correct_shipment', label: 'Clean Shipment', expected: 'PASS' },
-  { key: 'short_shipment', label: 'Short Shipment', expected: 'EXCEPTION' },
-  { key: 'wrong_variant', label: 'Wrong Variant', expected: 'EXCEPTION' },
-  { key: 'damaged_carton', label: 'Crushed Carton', expected: 'EXCEPTION' },
-  { key: 'water_damage', label: 'Water Damage', expected: 'EXCEPTION' },
-  { key: 'missing_component', label: 'Missing Cap', expected: 'EXCEPTION' },
-  { key: 'barcode_glare', label: 'Barcode Glare', expected: 'UNCERTAIN' },
-  { key: 'ambiguous', label: 'Ambiguous View', expected: 'UNCERTAIN' },
+  { key: 'correct_shipment', label: 'Clean shipment', expected: 'PASS' },
+  { key: 'short_shipment', label: 'Short shipment', expected: 'EXCEPTION' },
+  { key: 'wrong_variant', label: 'Wrong variant', expected: 'EXCEPTION' },
+  { key: 'damaged_carton', label: 'Crushed carton', expected: 'EXCEPTION' },
+  { key: 'water_damage', label: 'Water damage', expected: 'EXCEPTION' },
+  { key: 'missing_component', label: 'Missing cap', expected: 'EXCEPTION' },
+  { key: 'barcode_glare', label: 'Barcode glare', expected: 'UNCERTAIN' },
+  { key: 'ambiguous', label: 'Ambiguous view', expected: 'UNCERTAIN' },
+  { key: 'perception_failure', label: 'Model outage (fail-open)', expected: 'PENDING_REVIEW' },
 ];
 
-export const PERCEPTION_FAILURE_SCENARIO = 'perception_failure';
-
-// Visible labels + badge tones. The API values (PASS, EXCEPTION, ...) are never changed.
+// Display mapping. The API values (PASS, EXCEPTION, UNCERTAIN, PENDING_REVIEW) are never changed; the UI shows the
+// three receiving verdicts PASS / FAIL / UNCERTAIN. EXCEPTION is the backend's FAIL. PENDING_REVIEW means the photos
+// were NOT read (perception unavailable), so it is shown as UNCERTAIN with an explicit "not analyzed" qualifier.
+// stamp/line = the disposition recorded in the sealed record's outcome.
 export const DECISION_META = {
-  PASS: { label: 'Passed', tone: 'success' },
-  EXCEPTION: { label: 'Exception', tone: 'danger' },
-  UNCERTAIN: { label: 'Uncertain', tone: 'warning' },
-  PENDING_REVIEW: { label: 'Pending · Hold', tone: 'hold' },
-  NOT_ANALYZED: { label: 'Not inspected', tone: 'neutral' },
+  PASS: { label: 'PASS', verdict: 'PASS', tone: 'pass', stamp: 'Accept', line: 'Released to putaway', qualifier: '' },
+  EXCEPTION: { label: 'FAIL', verdict: 'FAIL', tone: 'fail', stamp: 'Reject', line: 'Quarantine and raise a supplier claim', qualifier: 'Exception' },
+  UNCERTAIN: { label: 'UNCERTAIN', verdict: 'UNCERTAIN', tone: 'warn', stamp: 'Review', line: 'Held for a person to review', qualifier: '' },
+  PENDING_REVIEW: { label: 'UNCERTAIN', verdict: 'UNCERTAIN', tone: 'hold', stamp: 'Hold', line: 'Photos not analyzed; held for review', qualifier: 'Not analyzed' },
+  NOT_ANALYZED: { label: 'Not inspected', verdict: 'DRAFT', tone: 'neutral', stamp: '—', line: 'No analysis has run yet', qualifier: '' },
 };
+
+// Verdict filter groups used by the dashboard and history.
+export const VERDICT_GROUPS = [
+  { key: 'PASS', label: 'PASS', tone: 'pass', decisions: ['PASS'] },
+  { key: 'FAIL', label: 'FAIL', tone: 'fail', decisions: ['EXCEPTION'] },
+  { key: 'UNCERTAIN', label: 'UNCERTAIN', tone: 'warn', decisions: ['UNCERTAIN', 'PENDING_REVIEW'] },
+  { key: 'DRAFT', label: 'Not inspected', tone: 'neutral', decisions: ['NOT_ANALYZED'] },
+];
 
 export const CHECK_META = {
-  PASS: { label: 'Passed', tone: 'success' },
-  FAIL: { label: 'Failed', tone: 'danger' },
-  UNCERTAIN: { label: 'Uncertain', tone: 'warning' },
-  NOT_REQUIRED: { label: 'Not required', tone: 'neutral' },
+  PASS: { label: 'Pass', tone: 'pass', icon: 'check' },
+  FAIL: { label: 'Fail', tone: 'fail', icon: 'x' },
+  UNCERTAIN: { label: 'Unsure', tone: 'warn', icon: 'help' },
+  NOT_REQUIRED: { label: 'N/A', tone: 'neutral', icon: 'minus' },
 };
 
-export const decisionMeta = (value) => DECISION_META[value] || { label: String(value || '—').replace(/_/g, ' '), tone: 'neutral' };
-export const checkMeta = (value) => CHECK_META[value] || { label: String(value || '—').replace(/_/g, ' '), tone: 'neutral' };
+export const decisionMeta = (value) => DECISION_META[value] || { label: String(value || '—').replace(/_/g, ' '), tone: 'neutral', stamp: '—', line: '' };
+export const checkMeta = (value) => CHECK_META[value] || { label: String(value || '—').replace(/_/g, ' '), tone: 'neutral', icon: 'minus' };
+
+export const CHECKS = [
+  { key: 'sku_check', label: 'SKU', short: 'SKU' },
+  { key: 'carton_check', label: 'Cartons', short: 'CTN' },
+  { key: 'units_per_carton_check', label: 'Units / carton', short: 'U/C' },
+  { key: 'quantity_check', label: 'Total units', short: 'QTY' },
+  { key: 'variant_check', label: 'Variant', short: 'VAR' },
+  { key: 'damage_check', label: 'Condition', short: 'DMG' },
+  { key: 'component_check', label: 'Components', short: 'KIT' },
+];
+export const checkLabel = (name) => CHECKS.find((check) => check.key === name)?.label
+  || String(name).replace(/_check$/, '').replace(/_/g, ' ');
 
 // Receiving exception categories, derived from the backend check names.
 const CHECK_CATEGORY = {
@@ -80,18 +104,44 @@ export const checkCategory = (checkName) => CHECK_CATEGORY[checkName] || '';
 export const failedCategories = (inspection) =>
   [...new Set((inspection?.checks || []).filter((check) => check.status === 'FAIL').map((check) => checkCategory(check.check_name)).filter(Boolean))];
 
+// What the operator can do about an UNCERTAIN check, keyed by the backend reason code (and check where it matters).
+// Purely a lookup on the real reason; nothing is inferred about the photos.
+const NEXT_STEP = {
+  'NOT_OBSERVED:carton_check': 'Add a pallet photo that shows every carton in one frame.',
+  'NOT_OBSERVED:quantity_check': 'Add a pallet photo with every carton, plus a carton label showing units per carton.',
+  'NOT_OBSERVED:units_per_carton_check': 'Add a close-up of a carton label that prints the pack quantity.',
+  'NOT_OBSERVED:sku_check': 'Add a sharp close-up of the shipping or product label.',
+  'NOT_OBSERVED:variant_check': 'Add a photo of an opened unit or the variant line on the label.',
+  'NOT_OBSERVED:damage_check': 'Add a photo of the carton exteriors.',
+  'NOT_OBSERVED:component_check': 'Add a photo of an opened unit with its parts laid out.',
+  OCR_AMBIGUOUS: 'Check the label by eye: the read differs only in look-alike characters.',
+  IDENTIFIER_TYPE: 'Only a barcode number was read. Photograph the printed SKU text.',
+  VIEWS_DISAGREE: 'Photos disagree. Retake the conflicting view in good light, or decide by eye.',
+  READINGS_DISAGREE: 'Direct count and cartons × units disagree. Recount on the dock.',
+  UNCORROBORATED_COUNT: 'Add a pallet photo (all cartons) and a label with units per carton to confirm the count.',
+  LOW_VISIBILITY: 'A photo was too unclear to judge. Retake it closer, without glare.',
+  PARTIAL_MATCH: 'The read only partly matches the PO. Confirm the variant by eye.',
+  MINOR_MARKS: 'Only cosmetic marks were seen. Decide whether they matter.',
+  UNRECOGNIZED_READING: 'The model used wording the rules do not recognise. Decide by eye.',
+  PO_INCONSISTENT: 'Fix the PO line: cartons × units per carton must equal the total.',
+  PO_FIELD_MISSING: 'Fill in the missing PO field.',
+  PERCEPTION_UNAVAILABLE: 'The photos were not read. Fix the vision setup and re-run.',
+};
+export const nextStep = (check) => NEXT_STEP[`${check.reason_code}:${check.check_name}`] || NEXT_STEP[check.reason_code] || '';
+
 // image_type values follow the backend contract enum.
 export const CAPTURE_VIEWS = [
-  { key: 'pallet', label: 'Pallet Overview', hint: 'Whole shipment / carton count', icon: 'layers' },
-  { key: 'carton', label: 'Carton Exterior', hint: 'Damage / crushing', icon: 'box' },
-  { key: 'label', label: 'Shipping Label', hint: 'Barcode / SKU match', icon: 'tag' },
-  { key: 'unit', label: 'Opened Unit', hint: 'Color / variant view', icon: 'package' },
-  { key: 'other', label: 'Kit Components', hint: 'Accessories check', icon: 'grid' },
+  { key: 'pallet', label: 'Receiving / pallet', short: 'Pallet', hint: 'Whole delivery with every carton in frame. Needed for carton count and total quantity.', icon: 'layers' },
+  { key: 'label', label: 'Shipping label', short: 'Label', hint: 'Close-up of the shipping or product label: SKU and pack quantity.', icon: 'tag' },
+  { key: 'carton', label: 'Carton & damage', short: 'Carton', hint: 'Carton exteriors and any packaging damage: crushing, tears, water.', icon: 'box' },
+  { key: 'unit', label: 'Product unit', short: 'Unit', hint: 'An opened product unit: colour and variant.', icon: 'package' },
+  { key: 'other', label: 'Components / other', short: 'Other', hint: 'Kit components laid out, or any additional supporting evidence.', icon: 'grid' },
 ];
 
-export const viewLabel = (key) => CAPTURE_VIEWS.find((view) => view.key === key)?.label || String(key || '').replace(/_/g, ' ');
+export const viewLabel = (key) => CAPTURE_VIEWS.find((view) => view.key === key)?.short || String(key || '').replace(/_/g, ' ');
+export const viewLongLabel = (key) => CAPTURE_VIEWS.find((view) => view.key === key)?.label || viewLabel(key);
 
-export const PO_FIELDS = ['po_id', 'sku', 'product_name', 'variant', 'expected_quantity', 'expected_cartons', 'units_per_carton', 'expected_components'];
+export const PO_FIELDS = ['po_id', 'po_line', 'sku', 'asin', 'unit_id', 'product_name', 'variant', 'expected_quantity', 'expected_cartons', 'units_per_carton', 'expected_components'];
 
 // Stable comparison key so a PO edit after creation forces a fresh inspection.
 export function poSignature(po) {
@@ -109,20 +159,25 @@ export const isAnalyzed = (inspection) =>
 export const effectiveDecision = (inspection) =>
   (isAnalyzed(inspection) ? inspection.override_decision || inspection.final_decision : 'NOT_ANALYZED');
 
-// The verdict the agent reached before the operator overrode it. After an override the backend
-// rewrites final_decision to the override verdict, so read it from the override chain instead:
-// overrides are appended oldest-first and carried across re-analyses, so walk back from the latest
-// one while each override follows directly on the previous (no re-analysis in between); that run's
-// first override holds the agent verdict in from_verdict. Returns null when it cannot be determined.
-export function agentDecision(inspection) {
-  const overrides = inspection?.overrides?.length ? inspection.overrides : inspection?.record?.overrides || [];
-  if (!overrides.length) return null;
-  let index = overrides.length - 1;
-  while (index > 0 && overrides[index].prev_content_hash && overrides[index].prev_content_hash === overrides[index - 1].new_content_hash) {
-    index -= 1;
-  }
-  return overrides[index].from_verdict || null;
-}
+export const verdictGroup = (inspection) => {
+  const decision = effectiveDecision(inspection);
+  return VERDICT_GROUPS.find((group) => group.decisions.includes(decision))?.key || 'DRAFT';
+};
+
+// When the shipment's latest verdict was produced: the sealed record's timestamp, else the last update.
+export const inspectedAt = (inspection) => inspection?.record?.created_at || inspection?.updated_at || inspection?.created_at;
+
+const QUANTITY_CHECKS = new Set(['quantity_check', 'carton_check', 'units_per_carton_check']);
+const MISMATCH_CHECKS = new Set(['damage_check', 'sku_check', 'variant_check', 'component_check']);
+export const hasQuantityDiscrepancy = (inspection) => (inspection?.checks || []).some((c) => c.status === 'FAIL' && QUANTITY_CHECKS.has(c.check_name));
+export const hasDamageOrMismatch = (inspection) => (inspection?.checks || []).some((c) => c.status === 'FAIL' && MISMATCH_CHECKS.has(c.check_name));
+
+export const formatBytes = (bytes) => {
+  if (!Number.isFinite(bytes)) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1048576).toFixed(1)} MB`;
+};
 
 export const formatTime = (value) => {
   if (!value) return '—';
@@ -130,4 +185,21 @@ export const formatTime = (value) => {
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
 };
 
+export const timeAgo = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  const s = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return date.toLocaleDateString();
+};
+
 export const shortHash = (hash) => (hash ? `${String(hash).slice(0, 12)}…` : '—');
+
+export const fmtValue = (value) => {
+  if (value === null || value === undefined || value === '') return '—';
+  if (Array.isArray(value)) return value.length ? value.join(', ') : 'none';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+};

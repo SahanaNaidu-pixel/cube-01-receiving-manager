@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { analyzeInspection, createInspection, healthCheck, uploadInspectionImages } from '../services/api';
+import { analyzeInspection, createInspection, uploadInspectionImages } from '../services/api';
 import { SCENARIOS } from '../constants';
 import { toPoPayload } from './PoEditor';
-import { Card, DecisionPill, Icon } from './Shared';
+import { DecisionPill, Icon, Panel } from './Shared';
 
-// The backend refuses to analyze with zero evidence, so each benchmark inspection gets one
-// generated placeholder PNG (the demo scenario, not the pixels, drives the verdict).
+// The backend refuses to analyze with zero evidence, so each benchmark inspection gets one generated
+// placeholder PNG. The scripted scenario, not the pixels, drives the verdict; that is the whole point:
+// this measures the rules engine, never the vision model.
 function placeholderImage(scenario) {
   return new Promise((resolve, reject) => {
     const canvas = document.createElement('canvas');
@@ -13,13 +14,15 @@ function placeholderImage(scenario) {
     canvas.height = 360;
     const ctx = canvas.getContext('2d');
     if (!ctx) { reject(new Error('Canvas is not available in this browser.')); return; }
-    ctx.fillStyle = '#101c2b';
+    ctx.fillStyle = '#15171a';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#edf4ff';
-    ctx.font = 'bold 36px sans-serif';
-    ctx.fillText('Benchmark placeholder', 40, 150);
-    ctx.font = '28px sans-serif';
-    ctx.fillText(scenario.key, 40, 210);
+    ctx.fillStyle = '#ff5a1f';
+    ctx.fillRect(0, 0, 640, 8);
+    ctx.fillStyle = '#ecebe6';
+    ctx.font = 'bold 34px sans-serif';
+    ctx.fillText('SCRIPTED BENCHMARK', 40, 150);
+    ctx.font = '26px monospace';
+    ctx.fillText(scenario.key, 40, 205);
     canvas.toBlob((blob) => {
       if (blob) resolve(new File([blob], `benchmark-${scenario.key}.png`, { type: 'image/png' }));
       else reject(new Error('Could not generate the placeholder image.'));
@@ -27,152 +30,99 @@ function placeholderImage(scenario) {
   });
 }
 
-const DEMO_REQUIRED = 'The Scenario Benchmark needs the backend running with DEMO_MODE=true. In live mode the scenario is ignored and analysis requires real photos.';
-const MODE_UNKNOWN = 'Could not confirm the backend is in demo mode, so the benchmark did not start (it never sends placeholder photos to a live model).';
+const DEMO_REQUIRED = 'Scripted scenarios are disabled on this backend (DEMO_MODE=false), so the benchmark would send placeholder images to the real model. Start the backend with DEMO_MODE=true to run it.';
 
-// The health endpoint reports the perception mode. Anything other than a boolean (e.g. an older
-// backend) is treated as unknown, so the benchmark refuses to start.
-async function probeDemoMode() {
-  const health = await healthCheck();
-  return typeof health?.demo_mode === 'boolean' ? health.demo_mode : null;
-}
-
-export default function BenchmarkView({ poForm, demoMode, setDemoMode, onChanged, onOpenInspection }) {
+export default function BenchmarkView({ poForm, perception, onChanged, onOpenInspection }) {
   const [rows, setRows] = useState([]);
   const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState('');
+  const [current, setCurrent] = useState('');
   const [notice, setNotice] = useState('');
   const po = toPoPayload(poForm);
 
   const run = async () => {
+    if (!perception) { setNotice('Backend status unknown: connect to the backend first.'); return; }
+    if (!perception.demo_scenarios) { setNotice(DEMO_REQUIRED); return; }
     setRunning(true);
     setNotice('');
-    // Confirm demo mode before every run (the backend may have restarted since demoMode was last
-    // learned): placeholder photos must never reach a live model.
-    setProgress('Checking the backend perception mode…');
-    let mode;
-    try {
-      mode = await probeDemoMode();
-    } catch (error) {
-      setNotice(error.message);
-      setProgress('');
-      setRunning(false);
-      return;
-    }
-    if (typeof mode === 'boolean') setDemoMode(mode);
-    if (mode !== true) {
-      setNotice(mode === false ? DEMO_REQUIRED : MODE_UNKNOWN);
-      setProgress('');
-      setRunning(false);
-      return;
-    }
     setRows([]);
     const results = [];
-    for (const [index, scenario] of SCENARIOS.entries()) {
-      setProgress(`Running ${index + 1}/${SCENARIOS.length}: ${scenario.label}…`);
-      const row = { ...scenario, actual: null, inspectionId: '', error: '' };
-      let stop = false;
+    for (const scenario of SCENARIOS) {
+      setCurrent(scenario.key);
+      const row = { ...scenario, actual: null, inspectionId: '', error: '', ms: 0 };
+      const started = performance.now();
       try {
         const created = await createInspection(po);
         row.inspectionId = created.inspection_id;
         await uploadInspectionImages(created.inspection_id, [await placeholderImage(scenario)], 'other');
         const result = await analyzeInspection(created.inspection_id, scenario.key);
-        if (typeof result.demo_mode === 'boolean') setDemoMode(result.demo_mode);
-        if (result.demo_mode === false) {
-          // The backend switched to live mode mid-run; this verdict is not a benchmark result.
-          row.error = 'Stopped: backend is in live mode';
-          setNotice(DEMO_REQUIRED);
-          stop = true;
-        } else {
-          row.actual = result.decision;
-        }
+        if (result.demo_mode === false) { setNotice(DEMO_REQUIRED); break; }
+        row.actual = result.decision;
       } catch (error) {
         row.error = error.message;
-        if (error.status === 401 || error.status === 503 || error.status === 0) {
+        if ([401, 503, 0].includes(error.status)) {
+          results.push(row);
+          setRows([...results]);
           setNotice(error.message);
-          stop = true;
+          break;
         }
       }
-      // Record every row before stopping so a created inspection keeps its Open link.
+      row.ms = Math.round(performance.now() - started);
       results.push(row);
       setRows([...results]);
-      if (stop) break;
     }
-    setProgress('');
+    setCurrent('');
     setRunning(false);
     onChanged();
   };
 
   const scored = rows.filter((row) => row.actual || row.error);
   const passed = rows.filter((row) => row.actual === row.expected).length;
-  const pct = scored.length ? Math.round((passed / scored.length) * 100) : 0;
+  const pending = SCENARIOS.filter((s) => !rows.some((r) => r.key === s.key));
 
   return (
     <div className="stack">
-      <Card
-        title="Scenario benchmark"
-        sub={`Each scenario creates a fresh inspection for the current PO (${po.po_id || '—'} · ${po.product_name || '—'}), uploads one generated placeholder photo and analyzes it with that demo scenario. Expected outcomes assume the PO-9001 preset (components include a cap).`}
+      <div className="alert alert--info">
+        <Icon name="flask" size={16} />
+        <span className="alert__text">
+          <strong>This tests the rules, not the AI.</strong>
+          Each scenario feeds fixed, scripted readings for SKU BLUE-BOTTLE-001 into the real decision engine and sealing path.
+          It says nothing about how well the vision model reads real photos. Run it against the PO-9001 sample line; current
+          manifest: <span className="mono">{po.po_id || '—'} · {po.sku || '—'}</span>.
+        </span>
+      </div>
+      <Panel title="Verdict paths" icon="gauge"
         actions={(
-          <button type="button" className="btn-primary" onClick={run} disabled={running} aria-busy={running}>
-            {running ? <span className="spinner" aria-hidden="true" /> : <Icon name="play" size={15} />}
-            {running ? 'Running…' : `Run all ${SCENARIOS.length} scenarios`}
+          <button type="button" className="btn btn--primary btn--sm" onClick={run} disabled={running} aria-busy={running}>
+            {running ? <span className="spinner" /> : <Icon name="play" size={14} />}{running ? 'Running…' : `Run ${SCENARIOS.length} scenarios`}
           </button>
-        )}
-      >
-        <div className="status-line" role="status" aria-live="polite">{progress}</div>
-        {notice && (
-          <div className="alert alert-warning" role="alert"><Icon name="alert" size={16} /><span className="alert-text">{notice}</span></div>
-        )}
-        {rows.length > 0 && (
-          <>
-            <div className={`claims-summary-bar flush score-bar ${passed < scored.length ? 'is-bad' : ''}`}>
-              <span>Score: {passed}/{scored.length} scenarios matched the expected decision</span>
-              <span>{pct}%</span>
-            </div>
-            <div className="chart-bar-track" aria-hidden="true">
-              <div className={`chart-bar-fill ${passed < scored.length ? 'bar-uncertain' : 'bar-contradicted'}`} style={{ width: `${pct}%` }}>{pct}%</div>
-            </div>
-          </>
-        )}
-        {rows.length === 0 && !running && (
-          <div className="empty-state">
-            <Icon name="flask" size={28} />
-            <h3>No benchmark run yet in this session</h3>
-            <p>Runs all eight demo scenarios end to end and checks every decision against the expected outcome.</p>
+        )}>
+        {notice && <div className="alert alert--warn" role="alert" style={{ marginBottom: 12 }}><Icon name="alert" size={16} /><span className="alert__text">{notice}</span></div>}
+        {scored.length > 0 && (
+          <div className="score" aria-live="polite">
+            <strong>{passed}/{scored.length}</strong>
+            <div className="score__bar"><i style={{ width: `${(passed / scored.length) * 100}%` }} /></div>
+            <span className="eyebrow">expected verdicts</span>
           </div>
         )}
-      </Card>
-
-      {rows.length > 0 && (
-        <Card flush title="Results" sub="One fresh inspection per scenario">
-          <div className="table-wrapper">
-            <table className="data-table">
-              <thead>
-                <tr><th>Scenario</th><th>Expected</th><th>Actual</th><th>Result</th><th>Inspection</th></tr>
-              </thead>
-              <tbody>
-                {rows.map((row) => (
-                  <tr key={row.key}>
-                    <td><div className="cell-strong">{row.label}</div><div className="cell-sub">{row.key}</div></td>
-                    <td><DecisionPill decision={row.expected} /></td>
-                    <td>{row.actual ? <DecisionPill decision={row.actual} /> : <span className="verify-result bad">{row.error || '—'}</span>}</td>
-                    <td>
-                      <span className={`sla-badge ${row.actual === row.expected ? 'sla-open' : 'sla-expired'}`}>
-                        {row.actual === row.expected ? 'MATCH' : 'MISMATCH'}
-                      </span>
-                    </td>
-                    <td>
-                      {row.inspectionId
-                        ? <button type="button" className="detail-btn" onClick={() => onOpenInspection(row.inspectionId)}>Open</button>
-                        : '—'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      )}
+        <div className="table-wrap">
+          <table className="table">
+            <thead><tr><th>Scenario</th><th>Expected</th><th>Actual</th><th>Result</th><th>Time</th><th /></tr></thead>
+            <tbody>
+              {[...rows, ...pending.map((s) => ({ ...s, placeholder: true }))].map((row) => (
+                <tr key={row.key} style={row.placeholder ? { opacity: current === row.key ? 1 : 0.55 } : undefined}>
+                  <td><div className="table__strong">{row.label}</div><div className="table__sub mono">{row.key}</div></td>
+                  <td><DecisionPill decision={row.expected} /></td>
+                  <td>{row.placeholder ? (current === row.key ? <span className="spinner" /> : '—')
+                    : row.actual ? <DecisionPill decision={row.actual} /> : <span style={{ color: 'var(--fail)' }}>{row.error || '—'}</span>}</td>
+                  <td>{row.placeholder ? '' : <span className={`tag ${row.actual === row.expected ? 'tag--pass' : 'tag--fail'}`}>{row.actual === row.expected ? 'match' : 'mismatch'}</span>}</td>
+                  <td className="mono">{row.ms ? `${row.ms} ms` : ''}</td>
+                  <td>{row.inspectionId ? <button type="button" className="btn btn--ghost btn--sm" onClick={() => onOpenInspection(row.inspectionId)}>Open</button> : null}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
     </div>
   );
 }

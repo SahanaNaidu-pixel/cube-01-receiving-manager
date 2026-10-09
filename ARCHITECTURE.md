@@ -10,8 +10,9 @@ A FastAPI modular monolith. It takes receiving photos, gets structured observati
 Frontend (X-API-Key)
   -> FastAPI auth (key -> organization, operator, role)
   -> upload: validate, store, SHA-256 per image
-  -> analyze: VisionService
-       live: OpenAI Responses API, strict JSON schema, blind read, 15 s timeout
+  -> analyze (/analyze, or /analyze/stream for live NDJSON progress events): VisionService
+       live: OpenAI Responses API or Chat Completions (AI_API_STYLE), strict JSON schema, blind read,
+             streamed: model_reading / model_observation / model_progress events while the JSON arrives
        demo: scripted readings attached to the real uploaded image ids
      -> validate image ids and schema
      -> fuse each check across all photos
@@ -33,8 +34,16 @@ Frontend (X-API-Key)
 
 ## Multi-photo fusion
 
-- A value read reliably (confidence of at least 0.6) in any photo counts. Photos that do not show it do not contradict it.
-- If two photos read different values, the check is `UNCERTAIN` (`VIEWS_DISAGREE`).
+- Readings below 0.6 confidence are ignored. Photos that do not show a value do not contradict it.
+- **Weighted consensus** (sku, variant, cartons, units/carton, quantity): each reliable reading votes with
+  `confidence x photo quality x view relevance` (quality: clear 1.0, blurred/dark 0.6, occluded 0.5, uncertain 0.4;
+  relevance: e.g. a label photo counts 1.0 for SKU, a pallet photo 1.0 for carton count, other views 0.6).
+  A value is accepted only if it holds at least 70% of the total weight; otherwise the check is `UNCERTAIN`
+  (`VIEWS_DISAGREE`). The vote split is stored in `measurements.consensus`. The weights are hand-set, not calibrated.
+- **Second look**: if a check ends `UNCERTAIN` for `VIEWS_DISAGREE`, `LOW_VISIBILITY` or `READINGS_DISAGREE`,
+  the agent makes one more call (still blind to the PO) asking only about those checks. A non-null re-read of a
+  photo replaces that photo's first read for that check; then the rules run again. If the second look fails,
+  the first-pass result stands. At most two model calls per run; `AI_SECOND_LOOK=false` disables it.
 - Damage: one photo showing damage is enough to `FAIL`. Low-confidence or "uncertain" readings make it `UNCERTAIN`. If no photo assessed damage, it is `UNCERTAIN`.
 - Components: a component seen in any photo is present. It is `FAIL` only when a photo shows it is missing; if it was not seen, the check is `UNCERTAIN`.
 

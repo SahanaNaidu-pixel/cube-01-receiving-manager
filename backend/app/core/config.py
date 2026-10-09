@@ -27,6 +27,12 @@ class Settings(BaseModel):
     # JSON: {"<api key>": {"organization_id": "...", "operator_id": "...", "role": "operator|approver"}}
     receiving_api_keys: str = ""
     seal_key: str = ""
+    second_look: bool = True  # one extra, focused model call only when the first pass leaves a check in doubt
+    # responses = OpenAI Responses API; chat = Chat Completions (most OpenAI-compatible servers: vLLM, Ollama,
+    # LiteLLM, OpenRouter, Azure); auto = responses on api.openai.com, chat when OPENAI_BASE_URL is set.
+    ai_api_style: str = "auto"
+    ai_stream: bool = True  # stream model output so the UI shows which photo is being read, as it happens
+    ai_image_detail: str = "high"  # high reads small label print; low/auto is cheaper and faster
 
 
 @lru_cache
@@ -57,4 +63,8 @@ def get_settings() -> Settings:
         ai_timeout_s=float(os.getenv("AI_TIMEOUT_S", "45")),
         receiving_api_keys=os.getenv("RECEIVING_API_KEYS", ""),
         seal_key=os.getenv("RECEIVING_SEAL_KEY", ""),
+        second_look=str(os.getenv("AI_SECOND_LOOK", "true")).lower() != "false",
+        ai_api_style=(os.getenv("AI_API_STYLE", "auto").strip().lower() or "auto"),
+        ai_stream=str(os.getenv("AI_STREAM", "true")).lower() != "false",
+        ai_image_detail=(os.getenv("AI_IMAGE_DETAIL", "high").strip().lower() or "high"),
     )

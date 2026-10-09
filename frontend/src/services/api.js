@@ -1,12 +1,31 @@
 // Production builds without VITE_API_BASE_URL call the same origin (e.g. Vercel, where /api is served by the app).
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? 'http://localhost:8000' : '');
 const KEY_STORAGE = 'receivingApiKey';
+export const apiBaseUrl = () => API_BASE_URL || window.location.origin;
+
+// In-memory log of this browser session's real API calls (method, path, status, duration). Feeds the
+// Agent Activity page; nothing is persisted and nothing is invented.
+const REQUEST_LOG_LIMIT = 200;
+const requestLog = [];
+const logListeners = new Set();
+export const getRequestLog = () => requestLog.slice();
+export function subscribeRequestLog(listener) {
+  logListeners.add(listener);
+  return () => logListeners.delete(listener);
+}
+function logRequest(entry) {
+  requestLog.unshift({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, at: new Date().toISOString(), ...entry });
+  if (requestLog.length > REQUEST_LOG_LIMIT) requestLog.length = REQUEST_LOG_LIMIT;
+  logListeners.forEach((listener) => listener());
+}
 
 // Each key maps server-side to one organization + operator (and role). It is set from the
 // operator panel and kept in localStorage; VITE_RECEIVING_API_KEY is a local-dev fallback only.
+// A stored empty string means "signed out", so the dev fallback key does not silently sign the operator back in.
 export function getApiKey() {
   try {
-    return localStorage.getItem(KEY_STORAGE) || import.meta.env.VITE_RECEIVING_API_KEY || '';
+    const stored = localStorage.getItem(KEY_STORAGE);
+    return stored !== null ? stored : import.meta.env.VITE_RECEIVING_API_KEY || '';
   } catch {
     return import.meta.env.VITE_RECEIVING_API_KEY || '';
   }
@@ -14,8 +33,7 @@ export function getApiKey() {
 
 export function setApiKey(value) {
   try {
-    if (value) localStorage.setItem(KEY_STORAGE, value);
-    else localStorage.removeItem(KEY_STORAGE);
+    localStorage.setItem(KEY_STORAGE, value || '');
   } catch {
     /* storage blocked: the key only lives for this request cycle */
   }
@@ -55,6 +73,8 @@ async function request(path, { method = 'GET', json, body, raw = false, messages
   if (json !== undefined) headers['Content-Type'] = 'application/json';
 
   let response;
+  const started = performance.now();
+  const logPath = path.split('?')[0];
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       method,
@@ -62,8 +82,10 @@ async function request(path, { method = 'GET', json, body, raw = false, messages
       body: json !== undefined ? JSON.stringify(json) : body,
     });
   } catch {
-    throw new ApiError(`Cannot reach the backend at ${API_BASE_URL}. Is it running?`, 0);
+    logRequest({ method, path: logPath, status: 0, ms: Math.round(performance.now() - started), error: 'Network error' });
+    throw new ApiError(`Cannot reach the backend at ${apiBaseUrl()}. Is it running?`, 0);
   }
+  const ms = Math.round(performance.now() - started);
 
   if (!response.ok) {
     let detail = '';
@@ -81,13 +103,19 @@ async function request(path, { method = 'GET', json, body, raw = false, messages
     const message = friendly
       ? (detail && detail !== friendly ? `${friendly} (${detail})` : friendly)
       : detail || `${fallback} (HTTP ${response.status})`;
+    logRequest({ method, path: logPath, status: response.status, ms, error: message });
     throw new ApiError(message, response.status);
   }
 
+  logRequest({ method, path: logPath, status: response.status, ms });
   return raw ? response : response.json();
 }
 
-export const healthCheck = () => request('/api/health', { fallback: 'Health check failed' });
+// probe=true asks the backend to really check the AI key/model with the provider (cached server-side).
+export const healthCheck = ({ probe = false, force = false } = {}) => {
+  const query = probe ? `?probe=true${force ? '&force=true' : ''}` : '';
+  return request(`/api/health${query}`, { fallback: 'Health check failed' });
+};
 
 export const listInspections = () => request('/api/inspections', { fallback: 'Could not load inspections' });
 
@@ -111,12 +139,70 @@ export function uploadInspectionImages(id, files, imageType = 'receiving_photo')
   });
 }
 
+// One photo per request: keeps every request far below serverless body limits (Vercel: 4.5 MB) and gives
+// real per-file progress. Calls onProgress(done, total, file) after each file is stored and hashed.
+export async function uploadPhotosOneByOne(id, items, onProgress) {
+  const stored = [];
+  for (const [index, item] of items.entries()) {
+    const result = await uploadInspectionImages(id, [item.file], item.view);
+    stored.push(...(result.images || []));
+    onProgress?.(index + 1, items.length, item, result.images?.[0]);
+  }
+  return stored;
+}
+
 export function analyzeInspection(id, scenario = '') {
   const query = scenario ? `?scenario=${encodeURIComponent(scenario)}` : '';
   return request(`/api/inspections/${encodeURIComponent(id)}/analyze${query}`, {
     method: 'POST',
     fallback: 'Analysis failed',
   });
+}
+
+// Streams the agent's real pipeline steps (NDJSON) and calls onEvent for each one. Resolves with the final
+// result from the `done` event; rejects on an `error` event or a broken stream.
+export async function analyzeInspectionStream(id, scenario, onEvent) {
+  const query = scenario ? `?scenario=${encodeURIComponent(scenario)}` : '';
+  const response = await request(`/api/inspections/${encodeURIComponent(id)}/analyze/stream${query}`, {
+    method: 'POST',
+    raw: true,
+    fallback: 'Analysis failed',
+  });
+  if (!response.body) throw new ApiError('This browser cannot read streamed responses.', 0);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const handle = (line) => {
+    if (!line.trim()) return undefined;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      throw new ApiError('The analysis stream sent an unreadable line. Check the inspection ledger.', 0);
+    }
+    onEvent(event);
+    if (event.type === 'error') {
+      const error = new ApiError(event.message, event.status || 500);
+      error.streamed = true; // already shown in the trace by onEvent
+      throw error;
+    }
+    return event.type === 'done' ? event.result : undefined;
+  };
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const lines = buffer.split('\n');
+      buffer = done ? '' : lines.pop(); // at end of stream the last line counts even without a newline
+      for (const line of lines) {
+        const result = handle(line);
+        if (result !== undefined) return result;
+      }
+      if (done) throw new ApiError('The analysis stream ended without a result. Check the inspection ledger.', 0);
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
 }
 
 export const overrideInspection = (id, decision, reason) =>

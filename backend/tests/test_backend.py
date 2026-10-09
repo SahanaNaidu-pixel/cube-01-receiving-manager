@@ -121,7 +121,6 @@ def test_health_endpoint_is_public():
     response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert isinstance(response.json()["demo_mode"], bool)  # the Scenario Benchmark reads this
 
 
 def test_cors_headers_are_enabled_for_allowed_origin():
@@ -374,7 +373,7 @@ def test_live_call_uses_responses_text_format_and_image_ids(monkeypatch):
     texts = " ".join(part.get("text", "") for part in kwargs["input"][0]["content"])
     assert ids[0] in texts and ids[1] in texts
     assert "BLUE-BOTTLE-001" not in texts  # blind read: PO values never reach the model
-    assert _FakeOpenAI.init_kwargs["timeout"] == 45 and _FakeOpenAI.init_kwargs["max_retries"] == 2
+    assert _FakeOpenAI.init_kwargs["timeout"] == 45 and _FakeOpenAI.init_kwargs["max_retries"] == 1
 
 
 def test_model_inventing_image_id_goes_to_pending_review(monkeypatch):
@@ -504,3 +503,230 @@ def test_db_records_are_append_only_and_tampering_is_detected(monkeypatch):
     verify = client.get(f"/api/inspections/{iid}/verify", headers=A).json()
     assert verify["integrity_verified"] is False
     assert any("seal invalid" in p for p in verify["problems"])
+
+
+# --- real photos, real-time stream, health --------------------------------------------------
+
+
+def test_demo_mode_never_scripts_a_real_run_without_a_scenario(monkeypatch):
+    # The bug: DEMO_MODE=true gave a real upload the scripted 'correct_shipment' verdict. A plain run must read the photo.
+    _set_env(monkeypatch, DEMO_MODE="true", AI_API_KEY=None, OPENAI_API_KEY=None)
+    iid = _create_inspection()["inspection_id"]
+    _upload(iid)
+    body = client.post(f"/api/inspections/{iid}/analyze", headers=A).json()
+    assert body["decision"] == "PENDING_REVIEW" and body["demo_mode"] is False
+    assert "not configured" in body["failure_reason"]
+    scripted = client.post(f"/api/inspections/{iid}/analyze", params={"scenario": "correct_shipment"}, headers=A).json()
+    assert scripted["demo_mode"] is True and scripted["analysis_status"] == "demo"
+
+
+def _stream_events(iid, **params):
+    with client.stream("POST", f"/api/inspections/{iid}/analyze/stream", params=params, headers=A) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("application/x-ndjson")
+        return [json.loads(line) for line in response.iter_lines() if line]
+
+
+def test_stream_emits_real_pipeline_steps_then_the_result(monkeypatch):
+    iid = _create_inspection()["inspection_id"]
+    ids = _upload(iid)
+    _fake_openai(monkeypatch, reply={"images": [{"image_id": ids[0], "visibility": "clear", "shows_whole_shipment": True, "observations": CLEAN}]})
+    events = [e for e in _stream_events(iid) if e["type"] != "heartbeat"]
+    types_ = [e["type"] for e in events]
+    assert types_[:4] == ["start", "perception", "perception_done", "photo"]
+    assert types_.count("check") == 7 and types_[-3:] == ["decision", "sealed", "done"]
+    assert all(isinstance(e["t_ms"], int) for e in events)
+    done = events[-1]["result"]
+    assert done["decision"] == "PASS" and done["record"]["version"] == 1
+    assert client.get(f"/api/inspections/{iid}/verify", headers=A).json()["integrity_verified"] is True
+
+
+def test_stream_fail_open_and_request_errors(monkeypatch):
+    _set_env(monkeypatch, AI_API_KEY=None, OPENAI_API_KEY=None, DEMO_MODE="false")
+    iid = _create_inspection()["inspection_id"]
+    assert client.post(f"/api/inspections/{iid}/analyze/stream", headers=A).status_code == 400  # no photos yet
+    assert client.post(f"/api/inspections/{iid}/analyze/stream", headers=B).status_code == 404  # other tenant
+    _upload(iid)
+    events = _stream_events(iid)
+    assert "perception_failed" in [e["type"] for e in events]
+    assert events[-1]["type"] == "done" and events[-1]["result"]["decision"] == "PENDING_REVIEW"
+
+
+def test_negative_count_is_invalid_reading_not_a_crash():
+    obs = [o for o in CLEAN if o["check_type"] != "carton"] + [_obs("carton", -2)]
+    decision, checks = _run([{"image_id": "IMG-1", "visibility": "clear", "observations": obs}])
+    assert checks["carton_check"]["reason_code"] == "NOT_OBSERVED" and decision == "UNCERTAIN"  # ignored, not a vote
+
+
+def test_health_reports_perception_mode(monkeypatch):
+    _set_env(monkeypatch, AI_API_KEY=None, OPENAI_API_KEY=None)
+    assert client.get("/api/health").json()["perception"]["mode"] == "not_configured"
+    _set_env(monkeypatch, AI_API_KEY="sk-x")
+    assert client.get("/api/health").json()["perception"]["mode"] == "live"
+
+
+# --- weighted consensus + second look ------------------------------------------------------------
+
+
+def _viewed_service(views):
+    inspection = Inspection(
+        inspection_id="INS-V", organization_id="org-a", po=PurchaseOrder(**PO),
+        images=[ReceivingImage(image_id=f"IMG-{i}", inspection_id="INS-V", filename="x.png", stored_filename="x.png",
+                               image_path="x", image_type=v) for i, v in enumerate(views, start=1)],
+    )
+    return VisionService(inspection)
+
+
+def _run_views(views, images_payload):
+    service = _viewed_service(views)
+    result = service._build_result(service._validate_payload(VisionAnalysisResponse.model_validate({"images": images_payload})))
+    return result["decision"], {c["check_name"]: c for c in result["checks"]}
+
+
+def test_consensus_clear_label_outweighs_blurry_offangle_misread():
+    rest = [o for o in CLEAN if o["check_type"] != "sku"]
+    decision, checks = _run_views(["label", "pallet"], [
+        {"image_id": "IMG-1", "visibility": "clear", "observations": [_obs("sku", "BLUE-BOTTLE-001", 0.95)] + rest},
+        {"image_id": "IMG-2", "visibility": "blurred", "observations": [_obs("sku", "BLUE-B0TTLE-00I", 0.65)]},
+    ])
+    assert checks["sku_check"]["status"] == "PASS" and decision == "PASS"
+    consensus = checks["sku_check"]["measurements"]["consensus"]
+    assert consensus["share"] >= 0.7 and len(consensus["votes"]) == 2  # the losing read is kept as evidence
+
+
+def test_consensus_comparable_clear_photos_that_conflict_stay_uncertain():
+    _, checks = _run_views(["label", "label"], [
+        {"image_id": "IMG-1", "visibility": "clear", "observations": [_obs("sku", "BLUE-BOTTLE-001")]},
+        {"image_id": "IMG-2", "visibility": "clear", "observations": [_obs("sku", "RED-BOTTLE-001")]},
+    ])
+    assert checks["sku_check"]["status"] == "UNCERTAIN" and checks["sku_check"]["reason_code"] == "VIEWS_DISAGREE"
+
+
+def test_damage_stays_strict_under_consensus():
+    _, checks = _run_views(["carton", "carton", "carton"], [
+        {"image_id": "IMG-1", "visibility": "clear", "observations": [_obs("damage", "none")]},
+        {"image_id": "IMG-2", "visibility": "clear", "observations": [_obs("damage", "none")]},
+        {"image_id": "IMG-3", "visibility": "clear", "observations": [_obs("damage", ["crushing"], 0.8)]},
+    ])
+    assert checks["damage_check"]["status"] == "FAIL"  # one reliable sighting of damage is enough
+
+
+def _sequenced_openai(monkeypatch, replies):
+    _fake_openai(monkeypatch, reply=None)
+    queue_ = list(replies)
+
+    def create(self, **kwargs):
+        _FakeResponses.calls.append(kwargs)
+        reply = queue_.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return types.SimpleNamespace(status="completed", model="gpt-test-2026", output_text=json.dumps(reply))
+    monkeypatch.setattr(_FakeResponses, "create", create)
+
+
+def _disputed_first_pass(ids):
+    rest = [o for o in CLEAN if o["check_type"] != "sku"]
+    return {"images": [
+        {"image_id": ids[0], "visibility": "clear", "shows_whole_shipment": True, "observations": [_obs("sku", "BLUE-BOTTLE-001")] + rest},
+        {"image_id": ids[1], "visibility": "clear", "shows_whole_shipment": False, "observations": [_obs("sku", "BLUE-BOTTLE-007")]},
+    ]}
+
+
+def test_second_look_settles_a_disputed_check(monkeypatch):
+    iid = _create_inspection()["inspection_id"]
+    ids = _upload(iid, n=2, view="label")
+    second = {"images": [
+        {"image_id": ids[1], "visibility": "clear", "shows_whole_shipment": False,
+         "observations": [_obs("sku", "BLUE-BOTTLE-001", 0.97), _obs("variant", "Red")]},  # off-target read is ignored
+    ]}
+    _sequenced_openai(monkeypatch, [_disputed_first_pass(ids), second])
+    body = client.post(f"/api/inspections/{iid}/analyze", headers=A).json()
+    assert len(_FakeResponses.calls) == 2
+    prompt = _FakeResponses.calls[1]["input"][0]["content"][0]["text"]
+    assert "SECOND LOOK" in prompt and "sku" in prompt and "BLUE-BOTTLE-001" not in prompt  # still blind to the PO
+    checks = {c["check_name"]: c for c in body["checks"]}
+    assert checks["sku_check"]["status"] == "PASS" and checks["variant_check"]["status"] == "PASS"
+    assert body["second_look"]["checks"] == ["sku"] and body["second_look"]["settled"] == ["sku"]
+    assert body["decision"] == "PASS"
+
+
+def test_second_look_can_be_disabled_and_failure_keeps_first_pass(monkeypatch):
+    iid = _create_inspection()["inspection_id"]
+    ids = _upload(iid, n=2, view="label")
+    _sequenced_openai(monkeypatch, [_disputed_first_pass(ids)])
+    _set_env(monkeypatch, AI_SECOND_LOOK="false")
+    body = client.post(f"/api/inspections/{iid}/analyze", headers=A).json()
+    assert len(_FakeResponses.calls) == 1 and body["second_look"] is None and body["decision"] == "UNCERTAIN"
+
+    _set_env(monkeypatch, AI_SECOND_LOOK="true")
+    _sequenced_openai(monkeypatch, [_disputed_first_pass(ids), TimeoutError("slow")])
+    body = client.post(f"/api/inspections/{iid}/analyze", headers=A).json()
+    assert len(_FakeResponses.calls) == 2
+    assert body["decision"] == "UNCERTAIN" and body["failure_reason"] is None  # not PENDING_REVIEW: first pass stands
+
+
+def test_clean_first_pass_makes_exactly_one_call(monkeypatch):
+    iid = _create_inspection()["inspection_id"]
+    ids = _upload(iid)
+    _sequenced_openai(monkeypatch, [{"images": [{"image_id": ids[0], "visibility": "clear", "shows_whole_shipment": True, "observations": CLEAN}]}])
+    assert client.post(f"/api/inspections/{iid}/analyze", headers=A).json()["decision"] == "PASS"
+    assert len(_FakeResponses.calls) == 1
+
+
+# --- reviewer probes (consensus safety) --------------------------------------------------------
+
+
+def test_clear_label_dissent_cannot_be_outvoted_into_pass():
+    # Reviewer probe: three identical unit-view reads used to outvote one clear label read of a different SKU.
+    rest = [o for o in CLEAN if o["check_type"] != "sku"]
+    _, checks = _run_views(["label", "unit"], [
+        {"image_id": "IMG-1", "visibility": "clear", "observations": [_obs("sku", "WRONG-9", 0.95)] + rest},
+        {"image_id": "IMG-2", "visibility": "clear", "observations": [_obs("sku", "BLUE-BOTTLE-001", 0.9)] * 3},
+    ])
+    assert checks["sku_check"]["status"] == "UNCERTAIN"
+    assert checks["sku_check"]["measurements"]["consensus"]["strong_dissent"] is True
+    _, checks = _run_views(["label", "unit", "unit", "carton"], [
+        {"image_id": "IMG-1", "visibility": "clear", "observations": [_obs("sku", "WRONG-9", 0.95)]},
+        *[{"image_id": f"IMG-{i}", "visibility": "clear", "observations": [_obs("sku", "BLUE-BOTTLE-001", 0.95)]} for i in (2, 3, 4)],
+    ])
+    assert checks["sku_check"]["status"] == "UNCERTAIN"  # many photos never overrule one clear dissenting label
+
+
+def test_negative_counts_never_derive_a_quantity():
+    obs = [o for o in CLEAN if o["check_type"] not in ("carton", "units_per_carton", "quantity")]
+    _, checks = _run([{"image_id": "IMG-1", "visibility": "clear", "observations": obs + [_obs("carton", -2), _obs("units_per_carton", -12)]}])
+    assert checks["quantity_check"]["status"] == "UNCERTAIN" and checks["quantity_check"]["observed_value"] is None
+
+
+def test_weak_reread_does_not_supersede_and_superseded_reads_stay_in_evidence(monkeypatch):
+    iid = _create_inspection()["inspection_id"]
+    ids = _upload(iid, n=2, view="label")
+    weak = {"images": [{"image_id": ids[1], "visibility": "clear", "observations": [_obs("sku", "BLUE-BOTTLE-001", 0.2)]}]}
+    _sequenced_openai(monkeypatch, [_disputed_first_pass(ids), weak])
+    body = client.post(f"/api/inspections/{iid}/analyze", headers=A).json()
+    assert body["decision"] == "UNCERTAIN" and body["second_look"]["superseded"] == 0
+
+    strong = {"images": [{"image_id": ids[1], "visibility": "clear", "observations": [_obs("sku", "BLUE-BOTTLE-001", 0.97)]}]}
+    _sequenced_openai(monkeypatch, [_disputed_first_pass(ids), strong])
+    body = client.post(f"/api/inspections/{iid}/analyze", headers=A).json()
+    superseded = [e for e in body["evidence"] if e["check_type"] == "sku:superseded"]
+    assert len(superseded) == 1 and superseded[0]["observation"] == "BLUE-BOTTLE-007"
+    assert body["record"]["checks"]  # sealed with the full evidence trail
+    sku = next(c for c in body["checks"] if c["check_name"] == "sku_check")
+    assert sku["status"] == "PASS" and sku["confidence"] == 0.97
+
+
+def test_failed_second_look_is_reported(monkeypatch):
+    iid = _create_inspection()["inspection_id"]
+    ids = _upload(iid, n=2, view="label")
+    _sequenced_openai(monkeypatch, [_disputed_first_pass(ids), TimeoutError("slow")])
+    body = client.post(f"/api/inspections/{iid}/analyze", headers=A).json()
+    assert body["second_look"]["failed"] == "TimeoutError" and body["second_look"]["checks"] == ["sku"]
+
+
+def test_disagreeing_check_reports_zero_confidence():
+    _, checks = _run_views(["label", "label"], [
+        {"image_id": "IMG-1", "visibility": "clear", "observations": [_obs("sku", "BLUE-BOTTLE-001")]},
+        {"image_id": "IMG-2", "visibility": "clear", "observations": [_obs("sku", "RED-BOTTLE-001")]},
+    ])
+    assert checks["sku_check"]["confidence"] == 0.0
